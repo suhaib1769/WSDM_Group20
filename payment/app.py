@@ -97,13 +97,22 @@ def remove_credit(user_id: str, amount: int):
     user_entry: UserValue = get_user_from_db(user_id)
     # update credit, serialize and update database
     user_entry.credit -= int(amount)
-    if user_entry.credit < 0:
-        abort(400, f"User: {user_id} credit cannot get reduced below zero!")
+    # if user_entry.credit < 0:
+    #     abort(400, f"User: {user_id} credit cannot get reduced below zero!")
     try:
         db.set(user_id, msgpack.encode(user_entry))
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
+
+@app.post('/check_money/<user_id>/<amount>')
+def check_money(user_id: str, amount: int):
+    user_entry: UserValue = get_user_from_db(user_id)
+    # update credit, serialize and update database
+    user_entry.credit -= int(amount)
+    if user_entry.credit < 0:
+        abort(400, f"User: {user_id} credit cannot get reduced below zero!")
+    return Response(f"User: {user_id} has enough credit", status=200)
 
 
 if __name__ == '__main__':
