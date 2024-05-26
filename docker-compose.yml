@@ -17,11 +17,13 @@ services:
     image: order:latest
     environment:
       - GATEWAY_URL=http://gateway:80
+      - KAFKA_SERVER:kafka:9092
     command: gunicorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
     env_file:
       - env/order_redis.env
     depends_on:
       - order-db
+      - kafka
 
   order-db:
     image: redis:7.2-bookworm
@@ -30,11 +32,14 @@ services:
   stock-service:
     build: ./stock
     image: stock:latest
+    environment:
+      - KAFKA_SERVER:kafka:9092
     command: gunicorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
     env_file:
       - env/stock_redis.env
     depends_on:
       - stock-db
+      - kafka
 
   stock-db:
     image: redis:7.2-bookworm
@@ -43,12 +48,39 @@ services:
   payment-service:
     build: ./payment
     image: user:latest
+    environment:
+      - KAFKA_SERVER:kafka:9092
     command: gunicorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
     env_file:
       - env/payment_redis.env
     depends_on:
       - payment-db
+      - kafka
 
   payment-db:
     image: redis:7.2-bookworm
     command: redis-server --requirepass redis --maxmemory 512mb
+
+  zookeeper:
+    image: bitnami/zookeeper:latest
+    container_name: zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      - ALLOW_ANONYMOUS_LOGIN=yes
+  
+  kafka:
+   image: bitnami/kafka:latest
+   container_name: kafka
+   ports:
+     - '9092:9092'
+     - '9093:9093'
+   environment:
+      - KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper:2181
+      - ALLOW_PLAINTEXT_LISTENER=yes
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CLIENT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      - KAFKA_CFG_LISTENERS=CLIENT://:9092,EXTERNAL://:9093
+      - KAFKA_CFG_ADVERTISED_LISTENERS=CLIENT://kafka:9092,EXTERNAL://localhost:9093
+      - KAFKA_INTER_BROKER_LISTENER_NAME=CLIENT
+   depends_on:
+     - zookeeper
