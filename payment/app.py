@@ -46,6 +46,8 @@ def get_user_from_db(user_id: str) -> UserValue | None:
 
 @app.post('/create_user')
 def create_user():
+    print("Creating user")
+    app.logger.info("Creating user")
     key = str(uuid.uuid4())
     value = msgpack.encode(UserValue(credit=0))
     try:

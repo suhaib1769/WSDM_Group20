@@ -8,7 +8,12 @@ import redis
 from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
 
+import asyncio
+from aiokafka import AIOKafkaProducer, AIOKafkaConsumer, AIOKafkaClient
+
 DB_ERROR_STR = "DB error"
+KAFKA_SERVER = os.environ.get('KAFKA_SERVER', 'localhost:9092')
+
 
 app = Flask("stock-service")
 
@@ -29,6 +34,41 @@ class StockValue(Struct):
     stock: int
     price: int
 
+producer = None
+
+async def init_kafka_producer():
+    global producer
+    producer = AIOKafkaProducer(
+        bootstrap_servers=KAFKA_SERVER,
+        enable_idempotence=True,
+        transactional_id="stock-service-transactional-id"
+    )
+    await producer.start()
+
+async def stop_kafka_producer():
+    await producer.stop()
+
+async def consume():
+    consumer = AIOKafkaConsumer(
+        'stock_request',
+        bootstrap_servers='localhost:9092',
+        group_id="my-group2",
+        enable_auto_commit=False)
+    # Get cluster layout and join group `my-group`
+    await consumer.start()
+    try:
+        # Consume messages
+        async for msg in consumer:
+            stock_data = msgpack.decode(msg.value)
+            action = stock_data.action
+            if action == 'find':
+                item_id = stock_data.item_id
+                item_entry = find_item(item_id)
+
+    finally:
+        # Will leave consumer group; perform autocommit if enabled.
+        await consumer.stop()
+
 
 def get_item_from_db(item_id: str) -> StockValue | None:
     # get serialized data
@@ -40,8 +80,16 @@ def get_item_from_db(item_id: str) -> StockValue | None:
     entry: StockValue | None = msgpack.decode(entry, type=StockValue) if entry else None
     if entry is None:
         # if item does not exist in the database; abort
-        abort(400, f"Item: {item_id} not found!")
-    return entry
+        # abort(400, f"Item: {item_id} not found!")
+        return {'status': '400', 'msg': f"Item: {item_id} not found!"}
+
+    item =  jsonify(
+        {
+            "stock": entry.stock,
+            "price": entry.price
+        }
+    )
+    return {'status': '200', 'msg': item} 
 
 
 @app.post('/item/create/<price>')
@@ -70,15 +118,27 @@ def batch_init_users(n: int, starting_stock: int, item_price: int):
     return jsonify({"msg": "Batch init for stock successful"})
 
 
-@app.get('/find/<item_id>')
-def find_item(item_id: str):
-    item_entry: StockValue = get_item_from_db(item_id)
-    return jsonify(
-        {
-            "stock": item_entry.stock,
-            "price": item_entry.price
-        }
-    )
+# @app.get('/find/<item_id>')
+# def find_item(item_id: str):
+#     item_entry: StockValue = get_item_from_db(item_id)
+#     return jsonify(
+#         {
+#             "stock": item_entry.stock,
+#             "price": item_entry.price
+#         }
+#     )
+
+async def find_item(item_id: str):
+    item_entry = get_item_from_db(item_id)
+
+    try:
+        message = {'action': 'find', 'msg': item_entry['msg'], "status": item_entry['status']}
+        async with producer.transaction():
+            await producer.send_and_wait('stock_response', value=msgpack.encode(message))
+    finally:
+        await stop_kafka_producer()
+    
+   
 
 
 @app.post('/add/<item_id>/<amount>')
@@ -117,9 +177,18 @@ def check_stock(item_id: str, amount: int):
         abort(400, f"Item: {item_id} stock cannot get reduced below zero!")
     return Response(f"Item: {item_id} has enough stock for order", status=200)
 
+async def main():
+    await init_kafka_producer()
+    await asyncio.Event().wait()  # Keep the service running
+    await asyncio.gather(consume())
+
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=8000, debug=True)
+    try:
+        asyncio.run(main()) 
+    finally:
+        asyncio.run(stop_kafka_producer())
 else:
     gunicorn_logger = logging.getLogger('gunicorn.error')
     app.logger.handlers = gunicorn_logger.handlers
