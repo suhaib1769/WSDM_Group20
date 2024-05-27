@@ -17,9 +17,9 @@ services:
     image: order:latest
     environment:
       - GATEWAY_URL=http://gateway:80
-      - KAFKA_SERVER:kafka:9092
+      - KAFKA_SERVER=kafka:9092
       - PYTHONUNBUFFERED=0
-    command: gunicorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
+    command: hypercorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
     env_file:
       - env/order_redis.env
     depends_on:
@@ -34,9 +34,9 @@ services:
     build: ./stock
     image: stock:latest
     environment:
-      - KAFKA_SERVER:kafka:9092
+      - KAFKA_SERVER=kafka:9092
       - PYTHONUNBUFFERED=0
-    command: gunicorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
+    command: hypercorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
     env_file:
       - env/stock_redis.env
     depends_on:
@@ -51,9 +51,9 @@ services:
     build: ./payment
     image: user:latest
     environment:
-      - KAFKA_SERVER:kafka:9092
+      - KAFKA_SERVER=kafka:9092
       - PYTHONUNBUFFERED=0
-    command: gunicorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
+    command: hypercorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
     env_file:
       - env/payment_redis.env
     depends_on:
