@@ -13,21 +13,22 @@ from flask import Flask, jsonify, abort, Response
 
 import asyncio
 from aiokafka import AIOKafkaProducer, AIOKafkaConsumer, AIOKafkaClient
-
+from quart import Quart, request, jsonify
+import json
 
 DB_ERROR_STR = "DB error"
 REQ_ERROR_STR = "Requests error"
 
 GATEWAY_URL = os.environ['GATEWAY_URL']
 
-KAFKA_SERVER = os.environ.get('KAFKA_SERVER', 'localhost:9092')
+KAFKA_SERVER = os.environ.get('KAFKA_SERVER', 'kafka:9092')
 # ORDER_TOPIC = os.environ.get('ORDER_TOPIC', 'order_topic')
 # PAYMENT_TOPIC = os.environ.get('PAYMENT_TOPIC', 'payment_topic')
 # STOCK_TOPIC = os.environ.get('STOCK_TOPIC', 'stock_topic')
 # GROUP_ID = os.environ.get('GROUP_ID', 'order_service')
 
 
-app = Flask("order-service")
+app = Quart("order-service")
 
 db: redis.Redis = redis.Redis(host=os.environ['REDIS_HOST'],
                               port=int(os.environ['REDIS_PORT']),
@@ -50,12 +51,21 @@ class OrderValue(Struct):
 
 producer = None
 
+# producer = AIOKafkaProducer(
+#         bootstrap_servers=KAFKA_SERVER,
+#         enable_idempotence=True,
+#         transactional_id="order-service-transactional-id"
+#     )
+# await producer.start()
+
 async def init_kafka_producer():
+    app.logger.info("Initializing producer")
     global producer
     producer = AIOKafkaProducer(
-        bootstrap_servers=KAFKA_SERVER,
+        bootstrap_servers='kafka:9092',
         enable_idempotence=True,
-        transactional_id="order-service-transactional-id"
+        transactional_id="order-service-transactional-id",
+        # api_version=(0,11,5)
     )
     await producer.start()
 
@@ -65,7 +75,7 @@ async def stop_kafka_producer():
 async def consume():
     consumer = AIOKafkaConsumer(
         'stock_response',
-        bootstrap_servers='localhost:9092',
+        bootstrap_servers='kafka:9092',
         group_id="my-group")
     # Get cluster layout and join group `my-group`
     await consumer.start()
@@ -153,9 +163,6 @@ def find_order(order_id: str):
 
 @app.get('/find_item/<item_id>')
 async def find_item(item_id: str):
-    app.logger.info("entered find item")
-    print("entered find item")
-    #save "entered" to a text file
     try:
         message = {'action': 'find', 'item_id': item_id}
         async with producer.transaction():
@@ -166,8 +173,10 @@ async def find_item(item_id: str):
                     return abort(400, response['msg'])
                 else:
                     return jsonify(response['msg'])
+            else:
+                return abort(400, "Unexpected response from stock service")
     except Exception as e:
-        return abort(400, f"Item: {item_id} not found!!!!!!!")
+        return abort(400, f"Error while finding item: {str(e)}")
     finally:
         await stop_kafka_producer()
 
@@ -263,10 +272,16 @@ async def main():
     await init_kafka_producer()
     await asyncio.Event().wait()  # Keep the service running
 
+@app.before_serving
+async def run_main():
+    await main()
+
 
 if __name__ == '__main__':
-    app.run(host="0.0.0.0", port=8000, debug=True)
     asyncio.run(main())
+    app.logger.info("Entering main")
+    app.run(host="0.0.0.0", port=8000, debug=True, use_reloader=True)
+    # asyncio.run(main())
 else:
     gunicorn_logger = logging.getLogger('gunicorn.error')
     app.logger.handlers = gunicorn_logger.handlers

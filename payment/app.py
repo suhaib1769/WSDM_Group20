@@ -7,11 +7,12 @@ import redis
 
 from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
+from quart import Quart, request, jsonify
 
 DB_ERROR_STR = "DB error"
 
 
-app = Flask("payment-service")
+app = Quart("payment-service")
 
 db: redis.Redis = redis.Redis(host=os.environ['REDIS_HOST'],
                               port=int(os.environ['REDIS_PORT']),

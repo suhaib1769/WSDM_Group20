@@ -10,12 +10,13 @@ from flask import Flask, jsonify, abort, Response
 
 import asyncio
 from aiokafka import AIOKafkaProducer, AIOKafkaConsumer, AIOKafkaClient
+from quart import Quart, request, jsonify
 
 DB_ERROR_STR = "DB error"
 KAFKA_SERVER = os.environ.get('KAFKA_SERVER', 'localhost:9092')
 
 
-app = Flask("stock-service")
+app = Quart("stock-service")
 
 db: redis.Redis = redis.Redis(host=os.environ['REDIS_HOST'],
                               port=int(os.environ['REDIS_PORT']),
