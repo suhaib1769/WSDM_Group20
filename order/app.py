@@ -4,9 +4,12 @@ import atexit
 import random
 import uuid
 from collections import defaultdict
-
+import threading
 import redis
 import requests
+import pika
+import json
+from queue import Queue
 
 from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
@@ -122,7 +125,6 @@ def send_get_request(url: str):
     else:
         return response
 
-
 @app.post('/addItem/<order_id>/<item_id>/<quantity>')
 def add_item(order_id: str, item_id: str, quantity: int):
     order_entry: OrderValue = get_order_from_db(order_id)
@@ -140,61 +142,152 @@ def add_item(order_id: str, item_id: str, quantity: int):
     return Response(f"Item: {item_id} added to: {order_id} price updated to: {order_entry.total_cost}",
                     status=200)
 
-
 def rollback_stock(removed_items: list[tuple[str, int]]):
     for item_id, quantity in removed_items:
         send_post_request(f"{GATEWAY_URL}/stock/add/{item_id}/{quantity}")
-
 
 @app.post('/checkout/<order_id>')
 def checkout(order_id: str):
     app.logger.debug(f"Checking out {order_id}")
     order_entry: OrderValue = get_order_from_db(order_id)
-    order_lock = db.lock("order_lock")
     # get the quantity per item
     items_quantities: dict[str, int] = defaultdict(int)
     for item_id, quantity in order_entry.items:
         items_quantities[item_id] += quantity
+    # The removed items will contain the items that we already have successfully subtracted stock from
+    # for rollback purposes.
+    removed_items: list[tuple[str, int]] = []
+    for item_id, quantity in items_quantities.items():
+        stock_reply = send_post_request(f"{GATEWAY_URL}/stock/subtract/{item_id}/{quantity}")
+        if stock_reply.status_code != 200:
+            # If one item does not have enough stock we need to rollback
+            rollback_stock(removed_items)
+            abort(400, f'Out of stock on item_id: {item_id}')
+        removed_items.append((item_id, quantity))
+    user_reply = send_post_request(f"{GATEWAY_URL}/payment/pay/{order_entry.user_id}/{order_entry.total_cost}")
+    if user_reply.status_code != 200:
+        # If the user does not have enough credit we need to rollback all the item stock subtractions
+        rollback_stock(removed_items)
+        abort(400, "User out of credit")
+    order_entry.paid = True
+    try:
+        db.set(order_id, msgpack.encode(order_entry))
+    except redis.exceptions.RedisError:
+        return abort(400, DB_ERROR_STR)
+    app.logger.debug("Checkout successful")
+    return Response("Checkout successful", status=200)
 
-    if order_lock.acquire():
-        for item_id, quantity in items_quantities.items():
-            enough_stock = send_post_request(f"{GATEWAY_URL}/stock/check_stock/{item_id}/{quantity}")
-            if enough_stock.status_code != 200:
-                # If one item does not have enough stock we need to rollback
-                order_lock.release()
-                abort(400, f'Out of stock on item_id: {item_id}')
+@app.get('/find_item/<item_id>')
+def find_item(item_id: str):
+    message = json.dumps({'item_id': item_id, 'tag': 'find_item'})
 
-        enough_money = send_post_request(f"{GATEWAY_URL}/payment/check_money/{order_entry.user_id}/{order_entry.total_cost}")
-        if enough_money.status_code != 200:
-            # If the user does not have enough credit we need to rollback all the item stock subtractions
-            order_lock.release()
-            abort(400, "User out of credit")
+    publish_message(message, "stock_request_queue")
 
-        for item_id, quantity in items_quantities.items():
-            stock_reply = send_post_request(f"{GATEWAY_URL}/stock/subtract/{item_id}/{quantity}")
-            if stock_reply.status_code != 200:
-                order_lock.release()
-                abort(400, f'Out of stock on item_id: {item_id}')
+    # # Consume the response from the response queue
+    # def on_response(ch, method, props, body):
+    #     app.logger.info("CONSUMING")
+    #     response = json.loads(body)
+    #     response_queue.put(response)
+    #     channel.stop_consuming()
 
-        user_reply = send_post_request(f"{GATEWAY_URL}/payment/pay/{order_entry.user_id}/{order_entry.total_cost}")
-        if user_reply.status_code != 200:
-            order_lock.release()
-            abort(400, "User out of credit")
-        order_entry.paid = True
+    # channel.basic_consume(
+    #     queue="stock_request_response_queue",
+    #     on_message_callback=on_response,
+    #     auto_ack=True)
 
-        try:
-            db.set(order_id, msgpack.encode(order_entry))
-        except redis.exceptions.RedisError:
-            order_lock.release()
-            return abort(400, DB_ERROR_STR)
-        order_lock.release()
-        app.logger.debug("Checkout successful")
-        return Response("Checkout successful", status=200)
+    # app.logger.info("Waiting for response")
+    # channel.start_consuming()
+
+    # Get the response from the queue
+    response = consume_messages()
+
+    if response['status'] == 'success':
+        app.logger.info(f"Received item: {response['item']}")
+        # Return the item details to the client
+        return jsonify(response['item'])
+    else:
+        app.logger.error(f"Error: {response['message']}")
+        # Handle the error appropriately
+        return jsonify({"error": response['message']}), 400
+
+def publish_message(message, routing_key):
+    app.logger.info("publishing message mfkr")
+    channel.basic_publish(
+        exchange='',
+        routing_key=routing_key,
+        body=message,
+        properties=pika.BasicProperties(
+            delivery_mode=2,  # make message persistent
+        ))
+
+def consume_messages():
+    app.logger.info("CONSUMING BROSKIII")
+    # Consume the response from the response queue
+    response_queue = Queue()
+
+    def on_response(ch, method, props, body):
+        app.logger.info("CONSUMING")
+        response = json.loads(body)
+        response_queue.put(response)
+        channel.stop_consuming()
+
+    global connection, channel
+    app.logger.info("Consuming messages from RabbitMQ")
+    try:
+        channel.basic_consume(
+            queue="stock_request_response_queue",
+            on_message_callback=on_response,
+            auto_ack=True,
+        )
+        app.logger.info("Starting RabbitMQ order consumer")
+        channel.start_consuming()
+    except Exception as e:
+        app.logger.info(f"Error in RabbitMQ order consumer: {e}")
+    
+    response = response_queue.get()
+    return response
+
+def setup_rabbitmq():
+    app.logger.info("Setting up RabbitMQ connection")
+    global connection, channel
+    try:
+        connection = pika.BlockingConnection(pika.ConnectionParameters(host="rabbitmq", blocked_connection_timeout=300))
+        channel = connection.channel()
+        # Declare queues
+        channel.queue_declare(queue="stock_request_queue")
+        channel.queue_declare(queue="stock_request_response_queue")
+    except pika.exceptions.AMQPConnectionError as e:
+        app.logger.error(f"Failed to connect to RabbitMQ: {e}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
+    # Setup RabbitMQ connection and channel
+    producer_thread = threading.Thread(target=setup_rabbitmq)
+    producer_thread.start()
+
+    # # Start RabbitMQ consumer in a separate thread
+    # consumer_thread = threading.Thread(target=consume_messages)
+    # consumer_thread.start()
+
+    # Start Flask app in the main thread
     app.run(host="0.0.0.0", port=8000, debug=True)
+    app.logger.info("Starting order service1")
+
 else:
-    gunicorn_logger = logging.getLogger('gunicorn.error')
+    gunicorn_logger = logging.getLogger("gunicorn.error")
     app.logger.handlers = gunicorn_logger.handlers
     app.logger.setLevel(gunicorn_logger.level)
+    # Setup RabbitMQ connection and channel
+    setup_rabbitmq()
+    # # Start RabbitMQ consumer in a separate thread
+    # consumer_thread = threading.Thread(target=consume_messages)
+    # consumer_thread.start()
+    # app.logger.info("Starting stock service2")
+
+
+# if __name__ == '__main__':
+#     app.run(host="0.0.0.0", port=8000, debug=True)
+# else:
+#     gunicorn_logger = logging.getLogger('gunicorn.error')
+#     app.logger.handlers = gunicorn_logger.handlers
+#     app.logger.setLevel(gunicorn_logger.level)
