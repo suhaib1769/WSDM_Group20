@@ -275,7 +275,7 @@ def checkout(order_id: str):
 async def main():
     await init_kafka_producer()
     app.logger.info("Completed Initialization")
-    await asyncio.Event().wait()  # Keep the service running
+    # await asyncio.Event().wait()  # Keep the service running
 
 
 @app.before_serving
@@ -284,7 +284,7 @@ async def run_main():
 
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    # asyncio.run(main())
     app.logger.info("Entering main")
     app.run(host="0.0.0.0", port=8000, debug=True, use_reloader=True)
     # asyncio.run(main())
