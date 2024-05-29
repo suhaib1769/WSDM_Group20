@@ -67,7 +67,9 @@ async def init_kafka_producer():
         transactional_id="order-service-transactional-id",
         # api_version=(0,11,5)
     )
+    app.logger.info("Producer initialized")
     await producer.start()
+    app.logger.info("Await complete")
 
 async def stop_kafka_producer():
     await producer.stop()
@@ -164,8 +166,10 @@ def find_order(order_id: str):
 @app.get('/find_item/<item_id>')
 async def find_item(item_id: str):
     try:
+        app.logger.info("Entered find_item")
         message = {'action': 'find', 'item_id': item_id}
         async with producer.transaction():
+            app.logger.info("Starting send_and_wait")
             await producer.send_and_wait('stock_request', value=msgpack.encode(message))
             response = await consume()
             if response['action'] == 'find':
@@ -270,7 +274,9 @@ def checkout(order_id: str):
     
 async def main():
     await init_kafka_producer()
+    app.logger.info("Completed Initialization")
     await asyncio.Event().wait()  # Keep the service running
+
 
 @app.before_serving
 async def run_main():
