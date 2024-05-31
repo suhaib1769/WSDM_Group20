@@ -50,45 +50,52 @@ class OrderValue(Struct):
     total_cost: int
 
 producer = None
-
-# producer = AIOKafkaProducer(
-#         bootstrap_servers=KAFKA_SERVER,
-#         enable_idempotence=True,
-#         transactional_id="order-service-transactional-id"
-#     )
-# await producer.start()
+consumer = None
 
 async def init_kafka_producer():
     app.logger.info("Initializing producer")
     global producer
     producer = AIOKafkaProducer(
         bootstrap_servers='kafka:9092',
-        enable_idempotence=True,
-        transactional_id="order-service-transactional-id",
+        # enable_idempotence=True,
+        # transactional_id="order-service-transactional-id",
         # api_version=(0,11,5)
     )
     app.logger.info("Producer initialized")
     await producer.start()
     app.logger.info("Await complete")
 
-async def stop_kafka_producer():
-    await producer.stop()
-
-async def consume():
+async def init_kafka_consumer():
+    app.logger.info("Initializing consumer")
+    global consumer
     consumer = AIOKafkaConsumer(
         'stock_response',
         bootstrap_servers='kafka:9092',
         group_id="my-group")
     # Get cluster layout and join group `my-group`
     await consumer.start()
+
+async def stop_kafka_producer():
+    await producer.stop()
+
+async def stop_kafka_consumer():
+    await consumer.stop
+
+async def consume():
+    app.logger.info("Entered consume")
+    
     try:
+        app.logger.info("Entered try consume")
         # Consume messages
         async for msg in consumer:
+            app.logger.info(f"entered order consume ")
             stock_data = msgpack.decode(msg.value)
-            action = stock_data.action
+            action = stock_data['action']
+            app.logger.info(f"{stock_data}")
             if action == 'find':
-                item_id = stock_data.item_id
-                item_entry = find_item(item_id)
+                app.logger.info("action is find")
+                return stock_data
+                # item_entry = await find_item(item_id)
 
     finally:
         # Will leave consumer group; perform autocommit if enabled.
@@ -168,21 +175,22 @@ async def find_item(item_id: str):
     try:
         app.logger.info("Entered find_item")
         message = {'action': 'find', 'item_id': item_id}
-        async with producer.transaction():
-            app.logger.info("Starting send_and_wait")
-            await producer.send_and_wait('stock_request', value=msgpack.encode(message))
-            response = await consume()
-            if response['action'] == 'find':
-                if response['status'] == '400':
-                    return abort(400, response['msg'])
-                else:
-                    return jsonify(response['msg'])
+        # async with producer.transaction():
+        app.logger.info("Starting send_and_wait")
+        await producer.send_and_wait('stock_request', value=msgpack.encode(message))
+        response = await consume()
+        app.logger.info("Response from consume")
+        if response['action'] == 'find':
+            if response['status'] == '400':
+                return abort(400, response['msg'])
             else:
-                return abort(400, "Unexpected response from stock service")
+                return jsonify(response['msg'])
+        else:
+            return abort(400, "Unexpected response from stock service")
     except Exception as e:
+        app.logger.info(f"error:{str(e)}" )
         return abort(400, f"Error while finding item: {str(e)}")
-    finally:
-        await stop_kafka_producer()
+    
 
 
 
@@ -275,6 +283,9 @@ def checkout(order_id: str):
 async def main():
     await init_kafka_producer()
     app.logger.info("Completed Initialization")
+    await init_kafka_consumer()
+    app.logger.info("Completed consumer")
+    # await asyncio.Event().wait() 
     # await asyncio.Event().wait()  # Keep the service running
 
 
