@@ -75,7 +75,7 @@ async def consume():
                 app.logger.info("msg in action find consumer")
                 item_id = stock_data["item_id"]
                 app.logger.info("calling find item")
-                item_entry = await find_item(item_id)
+                await find_item(item_id)
 
     finally:
         # Will leave consumer group; perform autocommit if enabled.

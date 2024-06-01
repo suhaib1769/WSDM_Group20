@@ -69,7 +69,7 @@ async def init_kafka_consumer():
     app.logger.info("Initializing consumer")
     global consumer
     consumer = AIOKafkaConsumer(
-        'stock_response',
+        'order_response',
         bootstrap_servers='kafka:9092',
         group_id="my-group")
     # Get cluster layout and join group `my-group`
@@ -233,7 +233,7 @@ def rollback_stock(removed_items: list[tuple[str, int]]):
 
 
 @app.post('/checkout/<order_id>')
-def checkout(order_id: str):
+async def checkout(order_id: str):
     app.logger.debug(f"Checking out {order_id}")
     order_entry: OrderValue = get_order_from_db(order_id)
     # get the quantity per item
@@ -250,11 +250,21 @@ def checkout(order_id: str):
             rollback_stock(removed_items)
             abort(400, f'Out of stock on item_id: {item_id}')
         removed_items.append((item_id, quantity))
-    user_reply = send_post_request(f"{GATEWAY_URL}/payment/pay/{order_entry.user_id}/{order_entry.total_cost}")
-    if user_reply.status_code != 200:
+    # user_reply = send_post_request(f"{GATEWAY_URL}/payment/pay/{order_entry.user_id}/{order_entry.total_cost}")
+    
+    message = {'action': 'pay', 'user_id': order_entry.user_id, 'amount': order_entry.total_cost}
+    app.logger.info("Starting send_and_wait")
+    await producer.send_and_wait('payment_request', value=msgpack.encode(message))
+    response = await consume()
+    
+    if response['status'] == '400':
         # If the user does not have enough credit we need to rollback all the item stock subtractions
         rollback_stock(removed_items)
         abort(400, "User out of credit")
+    # if user_reply.status_code != 200:
+    #     # If the user does not have enough credit we need to rollback all the item stock subtractions
+    #     rollback_stock(removed_items)
+    #     abort(400, "User out of credit")
     order_entry.paid = True
     try:
         db.set(order_id, msgpack.encode(order_entry))
