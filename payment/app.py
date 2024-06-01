@@ -2,11 +2,16 @@ import logging
 import os
 import atexit
 import uuid
+import threading
 
 import redis
 
 from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
+
+import pika
+import json
+
 
 DB_ERROR_STR = "DB error"
 
@@ -70,6 +75,7 @@ def batch_init_users(n: int, starting_money: int):
 
 @app.get('/find_user/<user_id>')
 def find_user(user_id: str):
+    app.logger.info(f"Finding user: {user_id}")
     user_entry: UserValue = get_user_from_db(user_id)
     return jsonify(
         {
@@ -77,7 +83,6 @@ def find_user(user_id: str):
             "credit": user_entry.credit
         }
     )
-
 
 @app.post('/add_funds/<user_id>/<amount>')
 def add_credit(user_id: str, amount: int):
@@ -97,12 +102,14 @@ def remove_credit(user_id: str, amount: int):
     user_entry: UserValue = get_user_from_db(user_id)
     # update credit, serialize and update database
     user_entry.credit -= int(amount)
-    # if user_entry.credit < 0:
-    #     abort(400, f"User: {user_id} credit cannot get reduced below zero!")
+    if user_entry.credit < 0:
+        # abort(400, f"User: {user_id} credit cannot get reduced below zero!")
+        return Response(f"User: {user_id} credit cannot get reduced below zero!", status=400)
     try:
         db.set(user_id, msgpack.encode(user_entry))
     except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
+        # return abort(400, DB_ERROR_STR)
+        return Response(DB_ERROR_STR, status=400)
     return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
 
 @app.post('/check_money/<user_id>/<amount>')
@@ -114,10 +121,91 @@ def check_money(user_id: str, amount: int):
         abort(400, f"User: {user_id} credit cannot get reduced below zero!")
     return Response(f"User: {user_id} has enough credit", status=200)
 
+def route_request(ch, method, properties, body):
+    app.logger.info("Received item request")
+    request = json.loads(body)
+    if request["tag"] == "pay":
+        app.logger.info("Paying")
+        response = remove_credit(request["user_id"], request["amount"])
+    if request["tag"] == "find_user":
+        app.logger.info("finding user")
+        user = get_user_from_db(request["user_id"])
+        if user:
+            app.logger.info("User found")
+            response = {"status": "success", "user_id":  request["user_id"]}
+        else:
+            response = {"status": "error", "message": 'User not found'}
+        
+    else:
+        response = {"status": "error", "message": 'NOT IT MY BOY'}
+    
+    app.logger.info(f"sending: " + request["tag"])
+    channel.basic_publish(
+            exchange="",
+            routing_key="payment_request_response_queue",
+            body=json.dumps(response),
+        )
+    app.logger.info(f"Processed request for: " + request["tag"])
 
-if __name__ == '__main__':
+
+def setup_rabbitmq():
+    app.logger.info("Setting up RabbitMQ connection")
+    global connection, channel
+    try:
+        connection = pika.BlockingConnection(pika.ConnectionParameters(host="rabbitmq", blocked_connection_timeout=300))
+        channel = connection.channel()
+        # Declare queues
+        channel.queue_declare(queue="payment_request_queue")
+        channel.queue_declare(queue="payment_request_response_queue")
+    except pika.exceptions.AMQPConnectionError as e:
+        app.logger.info(f"Failed to connect to RabbitMQ: {e}")
+
+
+def consume_messages():
+    global connection, channel
+    app.logger.info("Consuming messages from RabbitMQ")
+    try:
+        channel.basic_consume(
+            queue="payment_request_queue",
+            on_message_callback=route_request,
+            auto_ack=True,
+        )
+        app.logger.info("Starting RabbitMQ payment consumer")
+        channel.start_consuming()
+    except Exception as e:
+        app.logger.error(f"Error in RabbitMQ payment consumer: {e}")
+        if connection and connection.is_open:
+            connection.close()
+
+
+if __name__ == "__main__":
+    # Setup RabbitMQ connection and channel
+    producer_thread = threading.Thread(target=setup_rabbitmq)
+    producer_thread.start()
+
+    # Start RabbitMQ consumer in a separate thread
+    consumer_thread = threading.Thread(target=consume_messages)
+    consumer_thread.start()
+
+    # Start Flask app in the main thread
     app.run(host="0.0.0.0", port=8000, debug=True)
+    app.logger.info("Starting payment service1")
+
 else:
-    gunicorn_logger = logging.getLogger('gunicorn.error')
+    gunicorn_logger = logging.getLogger("gunicorn.error")
     app.logger.handlers = gunicorn_logger.handlers
     app.logger.setLevel(gunicorn_logger.level)
+    # Setup RabbitMQ connection and channel
+    setup_rabbitmq()
+    # Start RabbitMQ consumer in a separate thread
+    consumer_thread = threading.Thread(target=consume_messages)
+    consumer_thread.start()
+    app.logger.info("Starting payment service2")
+
+
+# if __name__ == '__main__':
+#     app.run(host="0.0.0.0", port=8000, debug=True)
+# else:
+#     gunicorn_logger = logging.getLogger('gunicorn.error')
+#     app.logger.handlers = gunicorn_logger.handlers
+#     app.logger.setLevel(gunicorn_logger.level)
