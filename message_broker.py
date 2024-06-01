@@ -2,7 +2,7 @@ import pika
 import json
 
 # Establish a connection to the message broker
-connection = pika.BlockingConnection(pika.ConnectionParameters(host='localhost'))
+connection = pika.BlockingConnection(pika.ConnectionParameters(host='localhost', heartbeat=3600))
 channel = connection.channel()
 
 # Declare the queues for the services

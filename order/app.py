@@ -144,7 +144,8 @@ def add_item(order_id: str, item_id: str, quantity: int):
 
 def rollback_stock(removed_items: list[tuple[str, int]]):
     for item_id, quantity in removed_items:
-        send_post_request(f"{GATEWAY_URL}/stock/add/{item_id}/{quantity}")
+        message = json.dumps({'item_id': item_id, 'amount': quantity, 'action': 'rollback'})
+        publish_message(message, "stock_queue")
 
 @app.post('/checkout/<order_id>')
 def checkout(order_id: str):
@@ -158,8 +159,10 @@ def checkout(order_id: str):
     # for rollback purposes.
     removed_items: list[tuple[str, int]] = []
     for item_id, quantity in items_quantities.items():
-        stock_reply = send_post_request(f"{GATEWAY_URL}/stock/subtract/{item_id}/{quantity}")
-        if stock_reply.status_code != 200:
+        message = json.dumps({'item_id': item_id, 'amount': quantity, 'action': 'subtract'})
+        publish_message(message, "stock_queue")
+        response = process_response(consume_messages())
+        if response == 'insufficient stock':
             # If one item does not have enough stock we need to rollback
             rollback_stock(removed_items)
             abort(400, f'Out of stock on item_id: {item_id}')
@@ -177,28 +180,22 @@ def checkout(order_id: str):
     app.logger.debug("Checkout successful")
     return Response("Checkout successful", status=200)
 
+def process_response(response):
+    if response['status'] == 'success':
+        app.logger.info("Response processed sucessfully")
+        # Return the item details to the client
+        return response['message']
+    else:
+        app.logger.error(f"Error: {response['message']}")
+        # Handle the error appropriately
+        return response['message']
+
+
 @app.get('/find_item/<item_id>')
 def find_item(item_id: str):
     message = json.dumps({'item_id': item_id, 'tag': 'find_item'})
 
-    publish_message(message, "stock_request_queue")
-
-    # # Consume the response from the response queue
-    # def on_response(ch, method, props, body):
-    #     app.logger.info("CONSUMING")
-    #     response = json.loads(body)
-    #     response_queue.put(response)
-    #     channel.stop_consuming()
-
-    # channel.basic_consume(
-    #     queue="stock_request_response_queue",
-    #     on_message_callback=on_response,
-    #     auto_ack=True)
-
-    # app.logger.info("Waiting for response")
-    # channel.start_consuming()
-
-    # Get the response from the queue
+    publish_message(message, "stock_queue")
     response = consume_messages()
 
     if response['status'] == 'success':
@@ -211,7 +208,7 @@ def find_item(item_id: str):
         return jsonify({"error": response['message']}), 400
 
 def publish_message(message, routing_key):
-    app.logger.info("publishing message mfkr")
+    app.logger.info("Order Service: Publishing Message")
     channel.basic_publish(
         exchange='',
         routing_key=routing_key,
@@ -219,25 +216,22 @@ def publish_message(message, routing_key):
         properties=pika.BasicProperties(
             delivery_mode=2,  # make message persistent
         ))
+    app.logger.info("Order Service: Message Published")
 
 def consume_messages():
-    app.logger.info("CONSUMING BROSKIII")
-    # Consume the response from the response queue
     response_queue = Queue()
 
-    def on_response(ch, method, props, body):
-        app.logger.info("CONSUMING")
-        response = json.loads(body)
-        response_queue.put(response)
+    def on_response(channel, method_frame, header_frame, body):
+        response_queue.put(json.loads(body))
+        channel.basic_ack(delivery_tag=method_frame.delivery_tag)
         channel.stop_consuming()
 
     global connection, channel
-    app.logger.info("Consuming messages from RabbitMQ")
+    app.logger.info("Order Service: Consuming Message")
     try:
         channel.basic_consume(
-            queue="stock_request_response_queue",
+            queue="order_queue",
             on_message_callback=on_response,
-            auto_ack=True,
         )
         app.logger.info("Starting RabbitMQ order consumer")
         channel.start_consuming()
@@ -254,21 +248,16 @@ def setup_rabbitmq():
         connection = pika.BlockingConnection(pika.ConnectionParameters(host="rabbitmq", blocked_connection_timeout=300))
         channel = connection.channel()
         # Declare queues
-        channel.queue_declare(queue="stock_request_queue")
-        channel.queue_declare(queue="stock_request_response_queue")
+        channel.queue_declare(queue="stock_queue")
+        channel.queue_declare(queue="order_queue")
     except pika.exceptions.AMQPConnectionError as e:
         app.logger.error(f"Failed to connect to RabbitMQ: {e}")
 
+with app.app_context():
+    # Setup RabbitMQ connection and channel
+    setup_rabbitmq()
 
 if __name__ == "__main__":
-    # Setup RabbitMQ connection and channel
-    producer_thread = threading.Thread(target=setup_rabbitmq)
-    producer_thread.start()
-
-    # # Start RabbitMQ consumer in a separate thread
-    # consumer_thread = threading.Thread(target=consume_messages)
-    # consumer_thread.start()
-
     # Start Flask app in the main thread
     app.run(host="0.0.0.0", port=8000, debug=True)
     app.logger.info("Starting order service1")
@@ -277,17 +266,3 @@ else:
     gunicorn_logger = logging.getLogger("gunicorn.error")
     app.logger.handlers = gunicorn_logger.handlers
     app.logger.setLevel(gunicorn_logger.level)
-    # Setup RabbitMQ connection and channel
-    setup_rabbitmq()
-    # # Start RabbitMQ consumer in a separate thread
-    # consumer_thread = threading.Thread(target=consume_messages)
-    # consumer_thread.start()
-    # app.logger.info("Starting stock service2")
-
-
-# if __name__ == '__main__':
-#     app.run(host="0.0.0.0", port=8000, debug=True)
-# else:
-#     gunicorn_logger = logging.getLogger('gunicorn.error')
-#     app.logger.handlers = gunicorn_logger.handlers
-#     app.logger.setLevel(gunicorn_logger.level)

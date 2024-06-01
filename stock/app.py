@@ -3,6 +3,7 @@ import os
 import atexit
 import uuid
 import threading
+import time
 
 import redis
 
@@ -104,17 +105,31 @@ def add_stock(item_id: str, amount: int):
 
 @app.post("/subtract/<item_id>/<amount>")
 def remove_stock(item_id: str, amount: int):
-    item_entry: StockValue = get_item_from_db(item_id)
-    # update stock, serialize and update database
-    item_entry.stock -= int(amount)
-    app.logger.debug(f"Item: {item_id} stock updated to: {item_entry.stock}")
-    if item_entry.stock < 0:
-        abort(400, f"Item: {item_id} stock cannot get reduced below zero!")
+    retries = 0
+    stock_lock = db.lock("stock_lock")
+
+    while retries < 3:
+        if stock_lock.acquire(blocking=False):  # Try to acquire the lock without blocking
+            break
+        retries += 1
+        time.sleep(1)  # Wait for 1 second before retrying
+    else:
+        # If we exit the while loop without breaking, it means all retries failed
+        Response("Failed to acquire lock after multiple attempts", status=400)
     try:
-        db.set(item_id, msgpack.encode(item_entry))
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
-    return Response(f"Item: {item_id} stock updated to: {item_entry.stock}", status=200)
+        item_entry: StockValue = get_item_from_db(item_id)
+        # update stock, serialize and update database
+        item_entry.stock -= int(amount)
+        app.logger.debug(f"Item: {item_id} stock updated to: {item_entry.stock}")
+        if item_entry.stock < 0:
+            return Response(f"Item: {item_id} stock cannot get reduced below zero!", status=400)
+        try:
+            db.set(item_id, msgpack.encode(item_entry))
+        except redis.exceptions.RedisError:
+            return Response(DB_ERROR_STR, status=400)
+        return Response(f"Item: {item_id} stock updated to: {item_entry.stock}", status=200)
+    finally:
+        stock_lock.release()  # Make sure to release the lock
 
 
 def on_find_item_request(request):
@@ -138,17 +153,25 @@ def on_find_item_request(request):
 def route_request(ch, method, properties, body):
     app.logger.info("Received item request")
     request = json.loads(body)
-    if request["tag"] == "find_item":
-        response = on_find_item_request(request)
+    if request['action'] == 'subtract':
+        http_response = remove_stock(request['item_id'], int(request['amount']))
+        if http_response.status_code != 200:
+            response = {"status": "insufficient_stock", "message": 'insufficient stock'}
+        else:
+            response = {"status": "success", "message": 'stock for item subtracted'}
+    elif request['action'] == 'rollback':
+        add_stock(request['item_id'], int(request['amount']))
+        return
     else:
-        response = {"status": "error", "message": 'NOT IT MY BOY'}
+        response = {"status": "undefined_action", "message": 'action not defined'}
     
     channel.basic_publish(
             exchange="",
-            routing_key="stock_request_response_queue",
+            routing_key="order_queue",
             body=json.dumps(response),
         )
-    app.logger.info(f"Processed request for: " + request["tag"])
+
+    app.logger.info(f"Processed request for: " + request["action"])
 
 
 def setup_rabbitmq():
@@ -158,8 +181,8 @@ def setup_rabbitmq():
         connection = pika.BlockingConnection(pika.ConnectionParameters(host="rabbitmq", blocked_connection_timeout=300))
         channel = connection.channel()
         # Declare queues
-        channel.queue_declare(queue="stock_request_queue")
-        channel.queue_declare(queue="stock_request_response_queue")
+        channel.queue_declare(queue="stock_queue")
+        channel.queue_declare(queue="order_queue")
     except pika.exceptions.AMQPConnectionError as e:
         app.logger.error(f"Failed to connect to RabbitMQ: {e}")
 
@@ -169,7 +192,7 @@ def consume_messages():
     app.logger.info("Consuming messages from RabbitMQ")
     try:
         channel.basic_consume(
-            queue="stock_request_queue",
+            queue="stock_queue",
             on_message_callback=route_request,
             auto_ack=True,
         )
@@ -180,27 +203,18 @@ def consume_messages():
         if connection and connection.is_open:
             connection.close()
 
-
-if __name__ == "__main__":
-    # Setup RabbitMQ connection and channel
-    producer_thread = threading.Thread(target=setup_rabbitmq)
-    producer_thread.start()
+with app.app_context():
+    setup_rabbitmq()
 
     # Start RabbitMQ consumer in a separate thread
     consumer_thread = threading.Thread(target=consume_messages)
     consumer_thread.start()
 
+if __name__ == "__main__":
     # Start Flask app in the main thread
     app.run(host="0.0.0.0", port=8000, debug=True)
     app.logger.info("Starting stock service1")
-
 else:
     gunicorn_logger = logging.getLogger("gunicorn.error")
     app.logger.handlers = gunicorn_logger.handlers
     app.logger.setLevel(gunicorn_logger.level)
-    # Setup RabbitMQ connection and channel
-    setup_rabbitmq()
-    # Start RabbitMQ consumer in a separate thread
-    consumer_thread = threading.Thread(target=consume_messages)
-    consumer_thread.start()
-    app.logger.info("Starting stock service2")
