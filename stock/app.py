@@ -181,23 +181,13 @@ def remove_stock(item_id: str, amount: int):
     # update stock, serialize and update database
     item_entry.stock -= int(amount)
     app.logger.debug(f"Item: {item_id} stock updated to: {item_entry.stock}")
-    # if item_entry.stock < 0:
-    #     abort(400, f"Item: {item_id} stock cannot get reduced below zero!")
+    if item_entry.stock < 0:
+        abort(400, f"Item: {item_id} stock cannot get reduced below zero!")
     try:
         db.set(item_id, msgpack.encode(item_entry))
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     return Response(f"Item: {item_id} stock updated to: {item_entry.stock}", status=200)
-
-
-@app.post('/check_stock/<item_id>/<amount>')
-def check_stock(item_id: str, amount: int):
-    item_entry: StockValue = get_item_from_db(item_id)
-    # update stock, serialize and update database
-    item_entry.stock -= int(amount)
-    if item_entry.stock < 0:
-        abort(400, f"Item: {item_id} stock cannot get reduced below zero!")
-    return Response(f"Item: {item_id} has enough stock for order", status=200)
 
 async def main():
     await init_kafka_producer()

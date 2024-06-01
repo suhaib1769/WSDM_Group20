@@ -190,9 +190,6 @@ async def find_item(item_id: str):
     except Exception as e:
         app.logger.info(f"error:{str(e)}" )
         return abort(400, f"Error while finding item: {str(e)}")
-    
-
-
 
 def send_post_request(url: str):
     try:
@@ -239,46 +236,32 @@ def rollback_stock(removed_items: list[tuple[str, int]]):
 def checkout(order_id: str):
     app.logger.debug(f"Checking out {order_id}")
     order_entry: OrderValue = get_order_from_db(order_id)
-    order_lock = db.lock("order_lock")
     # get the quantity per item
     items_quantities: dict[str, int] = defaultdict(int)
     for item_id, quantity in order_entry.items:
         items_quantities[item_id] += quantity
-
-    if order_lock.acquire():
-        for item_id, quantity in items_quantities.items():
-            enough_stock = send_post_request(f"{GATEWAY_URL}/stock/check_stock/{item_id}/{quantity}")
-            if enough_stock.status_code != 200:
-                # If one item does not have enough stock we need to rollback
-                order_lock.release()
-                abort(400, f'Out of stock on item_id: {item_id}')
-
-        enough_money = send_post_request(f"{GATEWAY_URL}/payment/check_money/{order_entry.user_id}/{order_entry.total_cost}")
-        if enough_money.status_code != 200:
-            # If the user does not have enough credit we need to rollback all the item stock subtractions
-            order_lock.release()
-            abort(400, "User out of credit")
-
-        for item_id, quantity in items_quantities.items():
-            stock_reply = send_post_request(f"{GATEWAY_URL}/stock/subtract/{item_id}/{quantity}")
-            if stock_reply.status_code != 200:
-                order_lock.release()
-                abort(400, f'Out of stock on item_id: {item_id}')
-
-        user_reply = send_post_request(f"{GATEWAY_URL}/payment/pay/{order_entry.user_id}/{order_entry.total_cost}")
-        if user_reply.status_code != 200:
-            order_lock.release()
-            abort(400, "User out of credit")
-        order_entry.paid = True
-
-        try:
-            db.set(order_id, msgpack.encode(order_entry))
-        except redis.exceptions.RedisError:
-            order_lock.release()
-            return abort(400, DB_ERROR_STR)
-        order_lock.release()
-        app.logger.debug("Checkout successful")
-        return Response("Checkout successful", status=200)
+    # The removed items will contain the items that we already have successfully subtracted stock from
+    # for rollback purposes.
+    removed_items: list[tuple[str, int]] = []
+    for item_id, quantity in items_quantities.items():
+        stock_reply = send_post_request(f"{GATEWAY_URL}/stock/subtract/{item_id}/{quantity}")
+        if stock_reply.status_code != 200:
+            # If one item does not have enough stock we need to rollback
+            rollback_stock(removed_items)
+            abort(400, f'Out of stock on item_id: {item_id}')
+        removed_items.append((item_id, quantity))
+    user_reply = send_post_request(f"{GATEWAY_URL}/payment/pay/{order_entry.user_id}/{order_entry.total_cost}")
+    if user_reply.status_code != 200:
+        # If the user does not have enough credit we need to rollback all the item stock subtractions
+        rollback_stock(removed_items)
+        abort(400, "User out of credit")
+    order_entry.paid = True
+    try:
+        db.set(order_id, msgpack.encode(order_entry))
+    except redis.exceptions.RedisError:
+        return abort(400, DB_ERROR_STR)
+    app.logger.debug("Checkout successful")
+    return Response("Checkout successful", status=200)
     
 async def main():
     await init_kafka_producer()

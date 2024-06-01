@@ -19,12 +19,7 @@ def add_stock(item_id: str, amount: int) -> int:
 
 
 def subtract_stock(item_id: str, amount: int) -> int:
-    check_stock = requests.post(f"{STOCK_URL}/stock/check_stock/{item_id}/{amount}").status_code
-    if check_stock == 200:
-        requests.post(f"{STOCK_URL}/stock/subtract/{item_id}/{amount}")
-        return check_stock
-    else:
-        return check_stock
+    return requests.post(f"{STOCK_URL}/stock/subtract/{item_id}/{amount}").status_code
 
 
 ########################################################################################################################
