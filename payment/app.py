@@ -26,6 +26,7 @@ def close_db_connection():
 
 atexit.register(close_db_connection)
 
+#Introduce consumer/producer
 
 class UserValue(Struct):
     credit: int
