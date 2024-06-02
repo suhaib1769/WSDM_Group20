@@ -435,6 +435,7 @@ def checkout(order_id: str):
             abort(400, f'Out of stock on item_id: {item_id}')
         removed_items.append((item_id, quantity))
     # user_reply = send_post_request(f"{GATEWAY_URL}/payment/pay/{order_entry.user_id}/{order_entry.total_cost}")
+    
     message = json.dumps({'user_id': order_entry.user_id, 'amount': order_entry.total_cost, 'tag': 'pay'})
     publish_message(message, "payment_request_queue")
     user_reply = consume_messages("payment_request_response_queue")
@@ -468,18 +469,19 @@ def find_item(item_id: str):
         return jsonify({"error": response['message']}), 400
     
 
-@app.get('/finding_user/<user_id>')
-def find_user(user_id: str):
-    message = json.dumps({'user_id': user_id, 'tag': 'find_user'})
+@app.post('/payment/<user_id>')
+def payment(user_id: str):
+    total_cost = 100
+    message = json.dumps({'user_id': user_id, 'amount': total_cost, 'tag': 'pay'})
     publish_message(message, "payment_request_queue")
-    response = consume_messages("payment_request_response_queue")
-    app.logger.info(f"Received user 1: {response['user_id']}")
-    if response['status'] == 'success':
-        app.logger.info(f"Received user 2: {response['user_id']}")
-        return jsonify(response['user_id'])
-    else:
-        app.logger.info(f"Error: {response['message']}")
-        return jsonify({"error": response['message']}), 400
+    user_reply = consume_messages("payment_request_response_queue")
+
+    if user_reply['status'] != 'success':
+        app.logger.info("User out of credit")
+        # rollback_stock(removed_items)
+        abort(400, "User out of credit")
+
+    return Response(f"User: {user_id} credit updated to: {user_reply['credit']}", status=200)
     
 
 

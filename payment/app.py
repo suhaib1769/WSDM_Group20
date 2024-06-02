@@ -98,19 +98,22 @@ def add_credit(user_id: str, amount: int):
 
 @app.post('/pay/<user_id>/<amount>')
 def remove_credit(user_id: str, amount: int):
-    app.logger.debug(f"Removing {amount} credit from user: {user_id}")
+    app.logger.info(f"Removing {amount} credit from user: {user_id}")
     user_entry: UserValue = get_user_from_db(user_id)
     # update credit, serialize and update database
     user_entry.credit -= int(amount)
     if user_entry.credit < 0:
         # abort(400, f"User: {user_id} credit cannot get reduced below zero!")
-        return Response(f"User: {user_id} credit cannot get reduced below zero!", status=400)
+        # return Response(f"User: {user_id} credit cannot get reduced below zero!", status=400)
+        return {"status": 400, "message": f"User: {user_id} credit cannot get reduced below zero!"}
     try:
         db.set(user_id, msgpack.encode(user_entry))
     except redis.exceptions.RedisError:
         # return abort(400, DB_ERROR_STR)
-        return Response(DB_ERROR_STR, status=400)
-    return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
+        # return Response(DB_ERROR_STR, status=400)
+        return {"status": 400, "message": DB_ERROR_STR}
+    # return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
+    return {"status": 200, "message": f"User: {user_id} credit updated to: {user_entry.credit}"}
 
 @app.post('/check_money/<user_id>/<amount>')
 def check_money(user_id: str, amount: int):
@@ -126,20 +129,25 @@ def route_request(ch, method, properties, body):
     request = json.loads(body)
     if request["tag"] == "pay":
         app.logger.info("Paying")
-        response = remove_credit(request["user_id"], request["amount"])
-    if request["tag"] == "find_user":
-        app.logger.info("finding user")
-        user = get_user_from_db(request["user_id"])
-        if user:
-            app.logger.info("User found")
-            response = {"status": "success", "user_id":  request["user_id"]}
+        message = remove_credit(request["user_id"], request["amount"])
+        app.logger.info(message)
+        if message['status'] == 200:
+            response = {"status": "success", "message":  "payment successfull"}
         else:
-            response = {"status": "error", "message": 'User not found'}
+            response = {"status": "error", "message": "payment failed"}
+    # if request["tag"] == "find_user":
+    #     app.logger.info("finding user")
+    #     user = get_user_from_db(request["user_id"])
+    #     if user:
+    #         app.logger.info("User found")
+    #         response = {"status": "success", "user_id":  request["user_id"]}
+    #     else:
+    #         response = {"status": "error", "message": 'User not found'}
         
     else:
         response = {"status": "error", "message": 'NOT IT MY BOY'}
     
-    app.logger.info(f"sending: " + request["tag"])
+    app.logger.info(f"sending: " + request["tag"] + " " + response)
     channel.basic_publish(
             exchange="",
             routing_key="payment_request_response_queue",
