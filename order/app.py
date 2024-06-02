@@ -182,29 +182,28 @@ def find_item(item_id: str):
     message = json.dumps({'item_id': item_id, 'tag': 'find_item'})
 
     publish_message(message, "stock_request_queue")
-
-    # # Consume the response from the response queue
-    # def on_response(ch, method, props, body):
-    #     app.logger.info("CONSUMING")
-    #     response = json.loads(body)
-    #     response_queue.put(response)
-    #     channel.stop_consuming()
-
-    # channel.basic_consume(
-    #     queue="stock_request_response_queue",
-    #     on_message_callback=on_response,
-    #     auto_ack=True)
-
-    # app.logger.info("Waiting for response")
-    # channel.start_consuming()
-
-    # Get the response from the queue
     response = consume_messages()
 
     if response['status'] == 'success':
         app.logger.info(f"Received item: {response['item']}")
         # Return the item details to the client
         return jsonify(response['item'])
+    else:
+        app.logger.error(f"Error: {response['message']}")
+        # Handle the error appropriately
+        return jsonify({"error": response['message']}), 400
+    
+@app.get('/search_user/<user_id>')
+def search_user(user_id: str):
+    message = json.dumps({'user_id': user_id, 'tag': 'find_user'})
+
+    publish_message(message, "payment_request_queue")
+    response = consume_messages()
+
+    if response['status'] == 'success':
+        app.logger.info(f"Received user: {response['user']}")
+        # Return the user details to the client
+        return jsonify(response['user'])
     else:
         app.logger.error(f"Error: {response['message']}")
         # Handle the error appropriately
@@ -235,7 +234,7 @@ def consume_messages():
     app.logger.info("Consuming messages from RabbitMQ")
     try:
         channel.basic_consume(
-            queue="stock_request_response_queue",
+            queue="payment_request_response_queue",
             on_message_callback=on_response,
             auto_ack=True,
         )
@@ -256,6 +255,8 @@ def setup_rabbitmq():
         # Declare queues
         channel.queue_declare(queue="stock_request_queue")
         channel.queue_declare(queue="stock_request_response_queue")
+        channel.queue_declare(queue="payment_request_queue")
+        channel.queue_declare(queue="payment_request_response_queue")
     except pika.exceptions.AMQPConnectionError as e:
         app.logger.error(f"Failed to connect to RabbitMQ: {e}")
 
