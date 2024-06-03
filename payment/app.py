@@ -3,7 +3,7 @@ import os
 import atexit
 import uuid
 import threading
-
+import time
 import redis
 
 from msgspec import msgpack, Struct
@@ -50,6 +50,7 @@ def get_user_from_db(user_id: str) -> UserValue | None:
 
 @app.post('/create_user')
 def create_user():
+
     key = str(uuid.uuid4())
     value = msgpack.encode(UserValue(credit=0))
     try:
@@ -85,34 +86,58 @@ def find_user(user_id: str):
 
 @app.post('/add_funds/<user_id>/<amount>')
 def add_credit(user_id: str, amount: int):
-    user_entry: UserValue = get_user_from_db(user_id)
-    # update credit, serialize and update database
-    user_entry.credit += int(amount)
+    retries = 0
+    payment_lock = db.lock("payment_lock")
+    while retries < 3:
+        if payment_lock.acquire(blocking=False):  # Try to acquire the lock without blocking
+            break
+        retries += 1
+        time.sleep(1)  # Wait for 1 second before retrying
+    else:
+        # If we exit the while loop without breaking, it means all retries failed
+        return Response("Failed to acquire payment lock after multiple attempts", status=400)
     try:
-        db.set(user_id, msgpack.encode(user_entry))
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
-    return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
+        user_entry: UserValue = get_user_from_db(user_id)
+        # update credit, serialize and update database
+        user_entry.credit += int(amount)
+        try:
+            db.set(user_id, msgpack.encode(user_entry))
+        except redis.exceptions.RedisError:
+            response = Response(DB_ERROR_STR, status=400)
+        response =  Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
+    finally:
+        payment_lock.release()
+        return response
 
 
 @app.post('/pay/<user_id>/<amount>')
 def remove_credit(user_id: str, amount: int):
-    app.logger.debug(f"Removing {amount} credit from user: {user_id}")
-    user_entry: UserValue = get_user_from_db(user_id)
-    # update credit, serialize and update database
-    user_entry.credit -= int(amount)
-    if user_entry.credit < 0:
-        # abort(400, f"User: {user_id} credit cannot get reduced below zero!")
-        # return Response(f"User: {user_id} credit cannot get reduced below zero!", status=400)
-        return {"status": 400, "message": f"User: {user_id} credit cannot get reduced below zero!"}
+    retries = 0
+    payment_lock = db.lock("payment_lock")
+    while retries < 3:
+        if payment_lock.acquire(blocking=False):
+            break
+        retries += 1
+        time.sleep(1)  # Wait for 1 second before retrying
+    else:
+        # If we exit the while loop without breaking, it means all retries failed
+        return Response("Failed to acquire payment lock after multiple attempts", status=400)
     try:
-        db.set(user_id, msgpack.encode(user_entry))
-    except redis.exceptions.RedisError:
-        # return abort(400, DB_ERROR_STR)
-        # return Response(DB_ERROR_STR, status=400)
-        return {"status": 400, "message": DB_ERROR_STR}
-    # return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
-    return {"status": 200, "message": f"User: {user_id} credit updated to: {user_entry.credit}"}
+        app.logger.debug(f"Removing {amount} credit from user: {user_id}")
+        user_entry: UserValue = get_user_from_db(user_id)
+        # update credit, serialize and update database
+        user_entry.credit -= int(amount)
+        if user_entry.credit < 0:
+            payment_lock.release()
+            return Response(f"User: {user_id} credit cannot get reduced below zero!", status=400)
+        try:
+            db.set(user_id, msgpack.encode(user_entry))
+            response = Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
+        except redis.exceptions.RedisError:
+            response =  Response(DB_ERROR_STR, status=400)
+    finally:
+        payment_lock.release()
+        return response
 
 @app.post('/check_money/<user_id>/<amount>')
 def check_money(user_id: str, amount: int):
@@ -132,20 +157,19 @@ def route_request(ch, method, properties, body):
         app.logger.info("Remove credit method called")
         message = remove_credit(request["user_id"], request["amount"])
         app.logger.info(message)
-        if message['status'] == 200:
-            response = {"status": "success", "message":  "payment successfull", "origin": "payment"}
+        if message.status_code == 200:
+            response = {"origin": "payment" , "status": 200, "message":  "payment successful"}
         else:
-            response = {"status": "error", "message": "payment failed","origin": "payment"}
+            response = {"origin": "payment" , "status": 400, "message":  "payment unsuccesfull"}
     else:
-        response = {"status": "error", "message": 'invalid action', "origin": "payment"}
+        response = {"origin": "payment" , "status": 400, "message":  "invalid action"}
     
-    app.logger.info(f"sending: " + request["action"] + " " + response)
     channel.basic_publish(
             exchange="",
             routing_key="payment_response_queue",
             body=json.dumps(response),
         )
-    app.logger.info(f"Processed request for: " + request["tag"])
+    app.logger.info(f"Processed request for: " + request["action"])
 
 
 def setup_rabbitmq():
@@ -169,10 +193,10 @@ def consume_messages():
             on_message_callback=route_request,
             auto_ack=True,
         )
-        app.logger.info("Starting RabbitMQ stock consumer")
+        app.logger.info("Starting RabbitMQ payment consumer")
         channel.start_consuming()
     except Exception as e:
-        app.logger.error(f"Error in RabbitMQ stock consumer: {e}")
+        app.logger.error(f"Error in RabbitMQ payment consumer: {e}")
         if connection and connection.is_open:
             connection.close()
 

@@ -93,6 +93,7 @@ def find_item(item_id: str):
 
 @app.post("/add/<item_id>/<amount>")
 def add_stock(item_id: str, amount: int):
+    app.logger.info("entered add_item of stock")
     item_entry: StockValue = get_item_from_db(item_id)
     # update stock, serialize and update database
     item_entry.stock += int(amount)
@@ -115,21 +116,22 @@ def remove_stock(item_id: str, amount: int):
         time.sleep(1)  # Wait for 1 second before retrying
     else:
         # If we exit the while loop without breaking, it means all retries failed
-        Response("Failed to acquire lock after multiple attempts", status=400)
+        return Response("Failed to acquire lock after multiple attempts", status=400)
     try:
         item_entry: StockValue = get_item_from_db(item_id)
         # update stock, serialize and update database
         item_entry.stock -= int(amount)
         app.logger.debug(f"Item: {item_id} stock updated to: {item_entry.stock}")
         if item_entry.stock < 0:
-            return Response(f"Item: {item_id} stock cannot get reduced below zero!", status=400)
+            response = Response(f"Item: {item_id} stock cannot get reduced below zero!", status=400)
         try:
             db.set(item_id, msgpack.encode(item_entry))
         except redis.exceptions.RedisError:
-            return Response(DB_ERROR_STR, status=400)
-        return Response(f"Item: {item_id} stock updated to: {item_entry.stock}", status=200)
+            response =  Response(DB_ERROR_STR, status=400)
+        response = Response(f"Item: {item_id} stock updated to: {item_entry.stock}", status=200)
     finally:
         stock_lock.release()  # Make sure to release the lock
+        return response
 
 
 def on_find_item_request(request):
@@ -156,14 +158,14 @@ def route_request(ch, method, properties, body):
     if request['action'] == 'subtract':
         http_response = remove_stock(request['item_id'], int(request['amount']))
         if http_response.status_code != 200:
-            response = {"status": "insufficient_stock", "message": 'insufficient stock', "origin": "stock"}
+            response = {"status": 400, "message": 'insufficient stock', "origin": "stock"}
         else:
-            response = {"status": "success", "message": 'stock for item subtracted', "origin": "stock"}
+            response = {"status": 200, "message": 'stock for item subtracted', "origin": "stock"}
     elif request['action'] == 'rollback':
         add_stock(request['item_id'], int(request['amount']))
         return
     else:
-        response = {"status": "undefined_action", "message": 'action not defined', "origin": "stock"}
+        response = {"status": 400, "message": 'action not defined', "origin": "stock"}
     
     channel.basic_publish(
             exchange="",

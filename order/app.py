@@ -149,19 +149,25 @@ def add_item(order_id: str, item_id: str, quantity: int):
 def rollback_stock(removed_items: list[tuple[str, int]]):
     for item_id, quantity in removed_items:
         message = json.dumps({'item_id': item_id, 'amount': quantity, 'action': 'rollback'})
+        app.logger.info("Entered rollback")
         publish_message(message, "stock_queue")
 
 @app.post('/checkout/<order_id>')
 def checkout(order_id: str):
     app.logger.debug(f"Checking out {order_id}")
     order_entry: OrderValue = get_order_from_db(order_id)
+    order_lock = db.lock("order_lock")
+    retries = 0
+   
     # get the quantity per item
     items_quantities: dict[str, int] = defaultdict(int)
     for item_id, quantity in order_entry.items:
         items_quantities[item_id] += quantity
+    
     # The removed items will contain the items that we already have successfully subtracted stock from
     # for rollback purposes.
     removed_items: list[tuple[str, int]] = []
+    
     for item_id, quantity in items_quantities.items():
         message = json.dumps({'item_id': item_id, 'amount': quantity, 'action': 'subtract'})
         publish_message(message, "stock_queue")
@@ -171,27 +177,37 @@ def checkout(order_id: str):
             rollback_stock(removed_items)
             abort(400, f'Out of stock on item_id: {item_id}')
         removed_items.append((item_id, quantity))
-    #new
+
     message = json.dumps({'user_id': order_entry.user_id, 'amount': order_entry.total_cost, 'action': 'pay'})
     publish_message(message, "payment_queue")
-    user_reply = consume_messages("payment_response_queue")
-    #End new code
-    # message = json.dumps({'item_id': item_id, 'amount': quantity, 'action': 'subtract'})    
-    # user_reply = send_post_request(f"{GATEWAY_URL}/payment/pay/{order_entry.user_id}/{order_entry.total_cost}")
-    if user_reply['status'] != 'success':
+    user_reply = process_response(consume_messages("payment_response_queue"))
+
+    app.logger.info("Received status from payment", user_reply )
+    if user_reply == 'payment unsuccesfull':
         # If the user does not have enough credit we need to rollback all the item stock subtractions
         rollback_stock(removed_items)
-        abort(400, f"User: {user_id} out of credit")
+        abort(400, f"User: {order_entry.user_id} out of credit")
     order_entry.paid = True
+    
+    while retries < 3:
+        if order_lock.acquire(blocking=False):  # Try to acquire the lock without blocking
+            break
+        retries += 1
+        time.sleep(1)  # Wait for 1 second before retrying
+    else:
+        # If we exit the while loop without breaking, it means all retries failed
+        return abort(400, DB_ERROR_STR)
     try:
         db.set(order_id, msgpack.encode(order_entry))
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
-    app.logger.debug("Checkout successful")
-    return Response("Checkout successful", status=200)
+    finally:
+        order_lock.release()
+        app.logger.debug("Checkout successful")
+        return Response("Checkout successful", status=200)
 
 def process_response(response):
-    if response['status'] == 'success':
+    if response['status'] == 200:
         app.logger.info("Response processed sucessfully")
         # Return the item details to the client
         return response['message']
@@ -203,7 +219,7 @@ def process_response(response):
 
 @app.get('/find_item/<item_id>')
 def find_item(item_id: str):
-    message = json.dumps({'item_id': item_id, 'tag': 'find_item'})
+    message = json.dumps({'item_id': item_id, 'action': 'find_item'})
 
     publish_message(message, "stock_queue")
     response = consume_messages("stock_response_queue")
