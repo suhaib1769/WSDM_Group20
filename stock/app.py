@@ -156,18 +156,18 @@ def route_request(ch, method, properties, body):
     if request['action'] == 'subtract':
         http_response = remove_stock(request['item_id'], int(request['amount']))
         if http_response.status_code != 200:
-            response = {"status": "insufficient_stock", "message": 'insufficient stock'}
+            response = {"status": "insufficient_stock", "message": 'insufficient stock', "origin": "stock"}
         else:
-            response = {"status": "success", "message": 'stock for item subtracted'}
+            response = {"status": "success", "message": 'stock for item subtracted', "origin": "stock"}
     elif request['action'] == 'rollback':
         add_stock(request['item_id'], int(request['amount']))
         return
     else:
-        response = {"status": "undefined_action", "message": 'action not defined'}
+        response = {"status": "undefined_action", "message": 'action not defined', "origin": "stock"}
     
     channel.basic_publish(
             exchange="",
-            routing_key="order_queue",
+            routing_key="stock_response_queue",
             body=json.dumps(response),
         )
 

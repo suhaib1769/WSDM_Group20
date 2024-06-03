@@ -35,6 +35,9 @@ def close_db_connection():
 
 atexit.register(close_db_connection)
 
+response_queue_stock = Queue()
+response_queue_payment = Queue()
+
 
 class OrderValue(Struct):
     paid: bool
@@ -255,10 +258,14 @@ def publish_message(message, routing_key):
 
 
 def consume_messages(queue):
-    response_queue = Queue()
+    global response_queue_payment, response_queue_stock
 
     def on_response(channel, method_frame, header_frame, body):
-        response_queue.put(json.loads(body))
+        msg = json.loads(body)
+        if msg['origin'] ==  'stock':
+            response_queue_stock.put(json.loads(body))
+        else:
+            response_queue_payment.put(json.loads(body))
         channel.basic_ack(delivery_tag=method_frame.delivery_tag)
         channel.stop_consuming()
 
@@ -276,7 +283,10 @@ def consume_messages(queue):
     except Exception as e:
         app.logger.info(f"Error in RabbitMQ order consumer: {e}")
     
-    response = response_queue.get()
+    if queue == 'stock_response_queue':
+        response = response_queue_stock.get()
+    else:
+        response = response_queue_payment.get()
     app.logger.info("Response processed in order", response)
     return response
 
@@ -284,7 +294,7 @@ def setup_rabbitmq():
     app.logger.info("Setting up RabbitMQ connection")
     global connection, channel
     try:
-        connection = pika.BlockingConnection(pika.ConnectionParameters(host="rabbitmq", blocked_connection_timeout=300))
+        connection = pika.BlockingConnection(pika.ConnectionParameters(host="rabbitmq"))
         channel = connection.channel()
         # Declare queues
         channel.queue_declare(queue="stock_queue")

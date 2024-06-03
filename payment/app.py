@@ -133,11 +133,11 @@ def route_request(ch, method, properties, body):
         message = remove_credit(request["user_id"], request["amount"])
         app.logger.info(message)
         if message['status'] == 200:
-            response = {"status": "success", "message":  "payment successfull"}
+            response = {"status": "success", "message":  "payment successfull", "origin": "payment"}
         else:
-            response = {"status": "error", "message": "payment failed"}
+            response = {"status": "error", "message": "payment failed","origin": "payment"}
     else:
-        response = {"status": "error", "message": 'invalid action'}
+        response = {"status": "error", "message": 'invalid action', "origin": "payment"}
     
     app.logger.info(f"sending: " + request["action"] + " " + response)
     channel.basic_publish(
