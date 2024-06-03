@@ -182,7 +182,7 @@ def setup_rabbitmq():
         channel = connection.channel()
         # Declare queues
         channel.queue_declare(queue="stock_queue")
-        channel.queue_declare(queue="order_queue")
+        channel.queue_declare(queue="stock_response_queue")
     except pika.exceptions.AMQPConnectionError as e:
         app.logger.error(f"Failed to connect to RabbitMQ: {e}")
 

@@ -9,8 +9,9 @@ import redis
 import requests
 import pika
 import json
+import time
 from queue import Queue
-
+from pika.exceptions import AMQPConnectionError, ChannelClosedByBroker, StreamLostError
 from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
 
@@ -161,17 +162,23 @@ def checkout(order_id: str):
     for item_id, quantity in items_quantities.items():
         message = json.dumps({'item_id': item_id, 'amount': quantity, 'action': 'subtract'})
         publish_message(message, "stock_queue")
-        response = process_response(consume_messages())
+        response = process_response(consume_messages("stock_response_queue"))
         if response == 'insufficient stock':
             # If one item does not have enough stock we need to rollback
             rollback_stock(removed_items)
             abort(400, f'Out of stock on item_id: {item_id}')
         removed_items.append((item_id, quantity))
-    user_reply = send_post_request(f"{GATEWAY_URL}/payment/pay/{order_entry.user_id}/{order_entry.total_cost}")
-    if user_reply.status_code != 200:
+    #new
+    message = json.dumps({'user_id': order_entry.user_id, 'amount': order_entry.total_cost, 'action': 'pay'})
+    publish_message(message, "payment_queue")
+    user_reply = consume_messages("payment_response_queue")
+    #End new code
+    # message = json.dumps({'item_id': item_id, 'amount': quantity, 'action': 'subtract'})    
+    # user_reply = send_post_request(f"{GATEWAY_URL}/payment/pay/{order_entry.user_id}/{order_entry.total_cost}")
+    if user_reply['status'] != 'success':
         # If the user does not have enough credit we need to rollback all the item stock subtractions
         rollback_stock(removed_items)
-        abort(400, "User out of credit")
+        abort(400, f"User: {user_id} out of credit")
     order_entry.paid = True
     try:
         db.set(order_id, msgpack.encode(order_entry))
@@ -196,7 +203,7 @@ def find_item(item_id: str):
     message = json.dumps({'item_id': item_id, 'tag': 'find_item'})
 
     publish_message(message, "stock_queue")
-    response = consume_messages()
+    response = consume_messages("stock_response_queue")
 
     if response['status'] == 'success':
         app.logger.info(f"Received item: {response['item']}")
@@ -207,18 +214,47 @@ def find_item(item_id: str):
         # Handle the error appropriately
         return jsonify({"error": response['message']}), 400
 
+def reconnect_rabbitmq():
+    global connection, channel
+    try:
+        if connection and connection.is_open:
+            connection.close()
+        setup_rabbitmq()
+    except pika.exceptions.AMQPConnectionError as e:
+        app.logger.error(f"Failed to reconnect to RabbitMQ: {e}")
+
 def publish_message(message, routing_key):
     app.logger.info("Order Service: Publishing Message")
-    channel.basic_publish(
-        exchange='',
-        routing_key=routing_key,
-        body=message,
-        properties=pika.BasicProperties(
-            delivery_mode=2,  # make message persistent
-        ))
-    app.logger.info("Order Service: Message Published")
+    global connection, channel
+    try:
+        if connection.is_closed or channel.is_closed:
+            reconnect_rabbitmq()
+        channel.basic_publish(
+            exchange='',
+            routing_key=routing_key,
+            body=message,
+            properties=pika.BasicProperties(
+                delivery_mode=2,  # Make message persistent
+            ))
+        app.logger.info("Order Service: Message Published")
+    except (AMQPConnectionError, ChannelClosedByBroker, StreamLostError) as e:
+        app.logger.error(f"Error publishing message: {e}")
+        time.sleep(5)  # Delay before retry
+        reconnect_rabbitmq()
+        try:
+            channel.basic_publish(
+                exchange='',
+                routing_key=routing_key,
+                body=message,
+                properties=pika.BasicProperties(
+                    delivery_mode=2,  # Make message persistent
+                ))
+            app.logger.info("Order Service: Message Published after reconnection")
+        except (AMQPConnectionError, ChannelClosedByBroker, StreamLostError) as e:
+            app.logger.error(f"Failed to publish message after reconnection: {e}")
 
-def consume_messages():
+
+def consume_messages(queue):
     response_queue = Queue()
 
     def on_response(channel, method_frame, header_frame, body):
@@ -230,15 +266,18 @@ def consume_messages():
     app.logger.info("Order Service: Consuming Message")
     try:
         channel.basic_consume(
-            queue="order_queue",
+            queue=queue,
             on_message_callback=on_response,
+            auto_ack=True,
         )
         app.logger.info("Starting RabbitMQ order consumer")
         channel.start_consuming()
+        app.logger.info("Finished consuming")
     except Exception as e:
         app.logger.info(f"Error in RabbitMQ order consumer: {e}")
     
     response = response_queue.get()
+    app.logger.info("Response processed in order", response)
     return response
 
 def setup_rabbitmq():
@@ -249,9 +288,12 @@ def setup_rabbitmq():
         channel = connection.channel()
         # Declare queues
         channel.queue_declare(queue="stock_queue")
-        channel.queue_declare(queue="order_queue")
+        channel.queue_declare(queue="stock_response_queue")
+        channel.queue_declare(queue="payment_queue")
+        channel.queue_declare(queue="payment_response_queue")
     except pika.exceptions.AMQPConnectionError as e:
         app.logger.error(f"Failed to connect to RabbitMQ: {e}")
+
 
 with app.app_context():
     # Setup RabbitMQ connection and channel
