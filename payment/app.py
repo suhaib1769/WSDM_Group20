@@ -112,42 +112,23 @@ def add_credit(user_id: str, amount: int):
 
 @app.post('/pay/<user_id>/<amount>')
 def remove_credit(user_id: str, amount: int):
-    retries = 0
-    # payment_lock = db.lock("payment_lock")
-    # while retries < 3:
-    #     if payment_lock.acquire(blocking=False):
-    #         break
-    #     retries += 1
-    #     time.sleep(1)  # Wait for 1 second before retrying
-    # else:
-    #     # If we exit the while loop without breaking, it means all retries failed
-    #     return Response("Failed to acquire payment lock after multiple attempts", status=400)
+    response = Response()
     try:
-        app.logger.debug(f"Removing {amount} credit from user: {user_id}")
+        app.logger.info(f"Removing {amount} credit from user: {user_id}")
         user_entry: UserValue = get_user_from_db(user_id)
         # update credit, serialize and update database
         user_entry.credit -= int(amount)
         if user_entry.credit < 0:
-            # payment_lock.release()
-            return Response(f"User: {user_id} credit cannot get reduced below zero!", status=400)
-        try:
-            db.set(user_id, msgpack.encode(user_entry))
-            response = Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
-        except redis.exceptions.RedisError:
-            response =  Response(DB_ERROR_STR, status=400)
+            response = Response(f"User: {user_id} credit cannot get reduced below zero!", status=400)
+        else:
+            try:
+                db.set(user_id, msgpack.encode(user_entry))
+                response = Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
+            except redis.exceptions.RedisError:
+                response = Response(DB_ERROR_STR, status=400)
     finally:
         # payment_lock.release()
         return response
-
-@app.post('/check_money/<user_id>/<amount>')
-def check_money(user_id: str, amount: int):
-    user_entry: UserValue = get_user_from_db(user_id)
-    # update credit, serialize and update database
-    user_entry.credit -= int(amount)
-    if user_entry.credit < 0:
-        abort(400, f"User: {user_id} credit cannot get reduced below zero!")
-    return Response(f"User: {user_id} has enough credit", status=200)
-
 
 
 def route_request(ch, method, properties, body):
@@ -160,13 +141,13 @@ def route_request(ch, method, properties, body):
         if message.status_code == 200:
             response = {"origin": "payment" , "status": 200, "message":  "payment successful"}
         else:
-            response = {"origin": "payment" , "status": 400, "message":  "payment unsuccesfull"}
+            response = {"origin": "payment", "status": 400, "message":  "payment unsuccesfull"}
     else:
         response = {"origin": "payment" , "status": 400, "message":  "invalid action"}
     
     channel.basic_publish(
             exchange="",
-            routing_key="order_response_queue",
+            routing_key="payment_response_queue",
             body=json.dumps(response),
         )
     app.logger.info(f"Processed request for: " + request["action"])
@@ -180,7 +161,7 @@ def setup_rabbitmq():
         channel = connection.channel()
         # Declare queues
         channel.queue_declare(queue="payment_queue")
-        channel.queue_declare(queue="order_response_queue")
+        channel.queue_declare(queue="payment_response_queue")
     except pika.exceptions.AMQPConnectionError as e:
         app.logger.error(f"Failed to connect to RabbitMQ: {e}")
 
