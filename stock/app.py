@@ -93,28 +93,39 @@ def add_stock(item_id: str, amount: int):
     return Response(f"Item: {item_id} stock updated to: {item_entry.stock}", status=200)
 
 
-@app.post('/subtract/<item_id>/<amount>')
-def remove_stock(item_id: str, amount: int):
+@app.post('/subtract/<item_id>/<amount>/<order_transaction_id>')
+def remove_stock(item_id: str, amount: int, order_transaction_id: str):
     item_entry: StockValue = get_item_from_db(item_id)
+    
+    if db.hmget(order_transaction_id, f'subtract_commit_{item_id}') == 1:
+        return Response(f"Item: {item_id} stock updated to: {item_entry.stock}", status=200)
+        
+    transaction_id_subtract_stock = str(uuid.uuid4())
+    db.hmset(order_transaction_id, {transaction_id_subtract_stock: msgpack.encode(f'StockService: Started {transaction_id_subtract_stock}: Subtract stock for item: {item_id}, Amount: {amount}')})
     # update stock, serialize and update database
     item_entry.stock -= int(amount)
     app.logger.debug(f"Item: {item_id} stock updated to: {item_entry.stock}")
-    # if item_entry.stock < 0:
-    #     abort(400, f"Item: {item_id} stock cannot get reduced below zero!")
-    try:
+    try:    
+        db.hmset(order_transaction_id, {transaction_id_subtract_stock: msgpack.encode(f'StockService: Commit {transaction_id_subtract_stock}: Subtract stock for item: {item_id}, Amount: {amount}'), f'subtract_commit_{item_id}': 1})
         db.set(item_id, msgpack.encode(item_entry))
-    except redis.exceptions.RedisError:
+    except redis.exceptions.RedisError:    
+        db.hmset(order_transaction_id, {transaction_id_subtract_stock: msgpack.encode(f'StockService: Failed {transaction_id_subtract_stock}: Subtract stock for item: {item_id}, Amount: {amount}')})
         return abort(400, DB_ERROR_STR)
+    db.hmset(order_transaction_id, {transaction_id_subtract_stock: msgpack.encode(f'StockService: Success {transaction_id_subtract_stock}: Subtract stock for item: {item_id}, Amount: {amount}')})
     return Response(f"Item: {item_id} stock updated to: {item_entry.stock}", status=200)
 
 
-@app.post('/check_stock/<item_id>/<amount>')
-def check_stock(item_id: str, amount: int):
-    item_entry: StockValue = get_item_from_db(item_id)
+@app.post('/check_stock/<item_id>/<amount>/<order_transaction_id>')
+def check_stock(item_id: str, amount: int, order_transaction_id: str):
+    item_entry: StockValue = get_item_from_db(item_id)   
+    transaction_id_check_stock = str(uuid.uuid4())
+    db.hmset(order_transaction_id, {transaction_id_check_stock: msgpack.encode(f'StockService: Started {transaction_id_check_stock}: Check stock for item: {item_id}, Amount: {amount}')})
     # update stock, serialize and update database
     item_entry.stock -= int(amount)
-    if item_entry.stock < 0:
+    if item_entry.stock < 0:    
+        db.hmset(order_transaction_id, {transaction_id_check_stock: msgpack.encode(f'StockService: Failed {transaction_id_check_stock}: Check stock for item: {item_id}, Amount: {amount}')})
         abort(400, f"Item: {item_id} stock cannot get reduced below zero!")
+    db.hmset(order_transaction_id, {transaction_id_check_stock: msgpack.encode(f'StockService: Success {transaction_id_check_stock}: Check stock for item: {item_id}, Amount: {amount}')})
     return Response(f"Item: {item_id} has enough stock for order", status=200)
 
 
