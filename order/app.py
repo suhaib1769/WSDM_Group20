@@ -35,8 +35,8 @@ def close_db_connection():
 
 atexit.register(close_db_connection)
 
-response_queue_stock = Queue()
-response_queue_payment = Queue()
+# response_queue_stock = Queue()
+# response_queue_payment = Queue()
 
 
 class OrderValue(Struct):
@@ -154,10 +154,11 @@ def rollback_stock(removed_items: list[tuple[str, int]]):
 
 @app.post('/checkout/<order_id>')
 def checkout(order_id: str):
+    global response_queue_payment, response_queue_stock
     app.logger.debug(f"Checking out {order_id}")
     order_entry: OrderValue = get_order_from_db(order_id)
-    order_lock = db.lock("order_lock")
-    retries = 0
+    # order_lock = db.lock("order_lock")
+    # retries = 0
    
     # get the quantity per item
     items_quantities: dict[str, int] = defaultdict(int)
@@ -171,7 +172,9 @@ def checkout(order_id: str):
     for item_id, quantity in items_quantities.items():
         message = json.dumps({'item_id': item_id, 'amount': quantity, 'action': 'subtract'})
         publish_message(message, "stock_queue")
-        response = process_response(consume_messages("stock_response_queue"))
+        while response_queue_stock.empty():
+            continue
+        response = process_response(response_queue_stock.get())
         if response == 'insufficient stock':
             # If one item does not have enough stock we need to rollback
             rollback_stock(removed_items)
@@ -180,7 +183,9 @@ def checkout(order_id: str):
 
     message = json.dumps({'user_id': order_entry.user_id, 'amount': order_entry.total_cost, 'action': 'pay'})
     publish_message(message, "payment_queue")
-    user_reply = process_response(consume_messages("payment_response_queue"))
+    while response_queue_payment.empty():
+        continue
+    user_reply = process_response(response_queue_payment.get())
 
     app.logger.info("Received status from payment", user_reply )
     if user_reply == 'payment unsuccesfull':
@@ -189,20 +194,20 @@ def checkout(order_id: str):
         abort(400, f"User: {order_entry.user_id} out of credit")
     order_entry.paid = True
     
-    while retries < 3:
-        if order_lock.acquire(blocking=False):  # Try to acquire the lock without blocking
-            break
-        retries += 1
-        time.sleep(1)  # Wait for 1 second before retrying
-    else:
-        # If we exit the while loop without breaking, it means all retries failed
-        return abort(400, DB_ERROR_STR)
+    # while retries < 3:
+    #     if order_lock.acquire(blocking=False):  # Try to acquire the lock without blocking
+    #         break
+    #     retries += 1
+    #     time.sleep(1)  # Wait for 1 second before retrying
+    # else:
+    #     # If we exit the while loop without breaking, it means all retries failed
+    #     return abort(400, DB_ERROR_STR)
     try:
         db.set(order_id, msgpack.encode(order_entry))
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     finally:
-        order_lock.release()
+        # order_lock.release()
         app.logger.debug("Checkout successful")
         return Response("Checkout successful", status=200)
 
@@ -217,22 +222,6 @@ def process_response(response):
         return response['message']
 
 
-@app.get('/find_item/<item_id>')
-def find_item(item_id: str):
-    message = json.dumps({'item_id': item_id, 'action': 'find_item'})
-
-    publish_message(message, "stock_queue")
-    response = consume_messages("stock_response_queue")
-
-    if response['status'] == 'success':
-        app.logger.info(f"Received item: {response['item']}")
-        # Return the item details to the client
-        return jsonify(response['item'])
-    else:
-        app.logger.error(f"Error: {response['message']}")
-        # Handle the error appropriately
-        return jsonify({"error": response['message']}), 400
-
 def reconnect_rabbitmq():
     global connection, channel
     try:
@@ -244,7 +233,12 @@ def reconnect_rabbitmq():
 
 def publish_message(message, routing_key):
     app.logger.info("Order Service: Publishing Message")
-    global connection, channel
+    global connection
+    channel = connection.channel()
+        # Declare queues
+    channel.queue_declare(queue="stock_queue")
+    # channel.queue_declare(queue="stock_response_queue")
+    channel.queue_declare(queue="payment_queue")
     try:
         if connection.is_closed or channel.is_closed:
             reconnect_rabbitmq()
@@ -272,64 +266,133 @@ def publish_message(message, routing_key):
         except (AMQPConnectionError, ChannelClosedByBroker, StreamLostError) as e:
             app.logger.error(f"Failed to publish message after reconnection: {e}")
 
+# def on_response(channel, method_frame, header_frame, body):
+#     app.logger.info("Entered on response")
+#     msg = json.loads(body)
+#     if msg['origin'] ==  'stock':
+#         response_queue_stock.put(json.loads(body))
+#     else:
+#         response_queue_payment.put(json.loads(body))
+#     app.logger.info(f"channel: {channel}")
+#     return
+    # channel.basic_ack(delivery_tag=method_frame.delivery_tag)
 
-def consume_messages(queue):
-    global response_queue_payment, response_queue_stock
 
-    def on_response(channel, method_frame, header_frame, body):
-        msg = json.loads(body)
-        if msg['origin'] ==  'stock':
-            response_queue_stock.put(json.loads(body))
-        else:
-            response_queue_payment.put(json.loads(body))
-        channel.basic_ack(delivery_tag=method_frame.delivery_tag)
-        channel.stop_consuming()
+# def consume_message_payment():
+#     # global connection
+#     connection_payment = pika.BlockingConnection(pika.ConnectionParameters(host="rabbitmq"))
+#     channel_payment = connection_payment.channel()
+#     channel_payment.queue_declare(queue="payment_response_queue")
+#     app.logger.info("Consuming messages from RabbitMQ")
+#     try:
+#         consumer_tag = f"ctag-{uuid.uuid4()}"
+#         channel_payment.basic_consume(
+#             queue='payment_response_queue',
+#             on_message_callback=on_response,
+#             auto_ack=True,
+#             consumer_tag=consumer_tag,
+#         )
+#         app.logger.info("Starting RabbitMQ order consumer")
+#         channel_payment.start_consuming()
+#         app.logger.info("Finished consuming")
+#     except Exception as e:
+#         app.logger.error(f"Error in RabbitMQ order consumer: {e}")
+#         if connection_payment and connection_payment.is_open:
+#             connection_payment.close()
+            
 
-    global connection, channel
-    app.logger.info("Order Service: Consuming Message")
-    try:
-        channel.basic_consume(
-            queue=queue,
-            on_message_callback=on_response,
-            auto_ack=True,
-        )
-        app.logger.info("Starting RabbitMQ order consumer")
-        channel.start_consuming()
-        app.logger.info("Finished consuming")
-    except Exception as e:
-        app.logger.info(f"Error in RabbitMQ order consumer: {e}")
+# def consume_message_stock():
+#     # global connection
+#     connection_stock = pika.BlockingConnection(pika.ConnectionParameters(host="rabbitmq"))
+#     channel_stock = connection_stock.channel()
+#     # 
     
-    if queue == 'stock_response_queue':
-        response = response_queue_stock.get()
-    else:
-        response = response_queue_payment.get()
-    app.logger.info("Response processed in order", response)
-    return response
+#     channel_stock.queue_declare(queue="stock_response_queue")
+#     app.logger.info("Consuming messages from RabbitMQ")
+#     app.logger.info(f"Channel stock: {channel_stock}")
+#     try:
+#         consumer_tag = f"ctag-{uuid.uuid4()}"
+#         channel_stock.basic_consume(
+#             queue='stock_response_queue',
+#             on_message_callback=on_response,
+#             auto_ack=True,
+#             consumer_tag=consumer_tag
+#         )
+#         app.logger.info("Starting RabbitMQ order consumer")
+#         channel_stock.start_consuming()
+#         app.logger.info("Finished consuming")
+#     except Exception as e:
+#         app.logger.error(f"Error in RabbitMQ order consumer: {e}")
+#         if connection_stock and connection_stock.is_open:
+#             connection_stock.close()
+
 
 def setup_rabbitmq():
     app.logger.info("Setting up RabbitMQ connection")
-    global connection, channel
+    global connection
     try:
         connection = pika.BlockingConnection(pika.ConnectionParameters(host="rabbitmq"))
-        channel = connection.channel()
-        # Declare queues
-        channel.queue_declare(queue="stock_queue")
-        channel.queue_declare(queue="stock_response_queue")
-        channel.queue_declare(queue="payment_queue")
-        channel.queue_declare(queue="payment_response_queue")
+        # channel = connection.channel()
+        # # Declare queues
+        # channel.queue_declare(queue="stock_queue")
+        # # channel.queue_declare(queue="stock_response_queue")
+        # channel.queue_declare(queue="payment_queue")
+        # channel.queue_declare(queue="payment_response_queue")
     except pika.exceptions.AMQPConnectionError as e:
         app.logger.error(f"Failed to connect to RabbitMQ: {e}")
 
+class ConsumerThread(threading.Thread):
+    def __init__(self, queue_name, response_queue):
+        threading.Thread.__init__(self, target=self.run)
+        self.queue_name = queue_name
+        self.response_queue = response_queue
+        self.connection = None
+        self.channel = None
+
+    def run(self):
+        app.logger.info("Consuming messages from RabbitMQ")
+        self.connection = pika.BlockingConnection(pika.ConnectionParameters(host='rabbitmq'))
+        self.channel = self.connection.channel()
+        self.channel.basic_qos(prefetch_count=1)
+        app.logger.info("Consuming messages from RabbitMQ")
+        self.channel.basic_consume(queue=self.queue_name, on_message_callback=self.on_response, auto_ack=False)
+        self.channel.start_consuming()
+        app.logger.info("After start conume")
+
+    def on_response(self, ch, method_frame, properties, body):
+        app.logger.info("entered on response")
+        response = json.loads(body)
+        self.response_queue.put(response)
+        self.channel.basic_ack(delivery_tag=method_frame.delivery_tag)
+
+    def stop(self):
+        if self.channel:
+            self.channel.stop_consuming()
+        if self.connection:
+            self.connection.close()
 
 with app.app_context():
     # Setup RabbitMQ connection and channel
+    global response_queue_payment, response_queue_stock
+    response_queue_stock = Queue()
+    response_queue_payment = Queue()
+    
+    # consumer_thread_payment = threading.Thread(target=consume_message_payment, daemon=True)
+    # consumer_thread_payment.start()
+    # consumer_thread_stock = threading.Thread(target=consume_message_stock, daemon=True)
+    # consumer_thread_stock.start()
+    
+    stock_consumer = ConsumerThread("stock_queue", response_queue_stock)
+    payment_consumer = ConsumerThread("payment_queue", response_queue_payment)
+    stock_consumer.start()
+    payment_consumer.start()
     setup_rabbitmq()
+    
 
 if __name__ == "__main__":
     # Start Flask app in the main thread
     app.run(host="0.0.0.0", port=8000, debug=True)
     app.logger.info("Starting order service1")
-
 else:
     gunicorn_logger = logging.getLogger("gunicorn.error")
     app.logger.handlers = gunicorn_logger.handlers

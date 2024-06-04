@@ -86,16 +86,16 @@ def find_user(user_id: str):
 
 @app.post('/add_funds/<user_id>/<amount>')
 def add_credit(user_id: str, amount: int):
-    retries = 0
-    payment_lock = db.lock("payment_lock")
-    while retries < 3:
-        if payment_lock.acquire(blocking=False):  # Try to acquire the lock without blocking
-            break
-        retries += 1
-        time.sleep(1)  # Wait for 1 second before retrying
-    else:
-        # If we exit the while loop without breaking, it means all retries failed
-        return Response("Failed to acquire payment lock after multiple attempts", status=400)
+    # retries = 0
+    # payment_lock = db.lock("payment_lock")
+    # while retries < 3:
+    #     if payment_lock.acquire(blocking=False):  # Try to acquire the lock without blocking
+    #         break
+    #     retries += 1
+    #     time.sleep(1)  # Wait for 1 second before retrying
+    # else:
+    #     # If we exit the while loop without breaking, it means all retries failed
+    #     return Response("Failed to acquire payment lock after multiple attempts", status=400)
     try:
         user_entry: UserValue = get_user_from_db(user_id)
         # update credit, serialize and update database
@@ -106,37 +106,41 @@ def add_credit(user_id: str, amount: int):
             response = Response(DB_ERROR_STR, status=400)
         response =  Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
     finally:
-        payment_lock.release()
+        # payment_lock.release()
         return response
 
 
 @app.post('/pay/<user_id>/<amount>')
 def remove_credit(user_id: str, amount: int):
-    retries = 0
-    payment_lock = db.lock("payment_lock")
-    while retries < 3:
-        if payment_lock.acquire(blocking=False):
-            break
-        retries += 1
-        time.sleep(1)  # Wait for 1 second before retrying
-    else:
-        # If we exit the while loop without breaking, it means all retries failed
-        return Response("Failed to acquire payment lock after multiple attempts", status=400)
+    # retries = 0
+    # payment_lock = db.lock("payment_lock")
+    # while retries < 3:
+    #     if payment_lock.acquire(blocking=False):
+    #         break
+    #     retries += 1
+    #     time.sleep(1)  # Wait for 1 second before retrying
+    # else:
+    #     # If we exit the while loop without breaking, it means all retries failed
+    #     return Response("Failed to acquire payment lock after multiple attempts", status=400)
     try:
-        app.logger.debug(f"Removing {amount} credit from user: {user_id}")
+        app.logger.info(f"Removing {amount} credit from user: {user_id}")
         user_entry: UserValue = get_user_from_db(user_id)
         # update credit, serialize and update database
         user_entry.credit -= int(amount)
         if user_entry.credit < 0:
-            payment_lock.release()
-            return Response(f"User: {user_id} credit cannot get reduced below zero!", status=400)
-        try:
-            db.set(user_id, msgpack.encode(user_entry))
-            response = Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
-        except redis.exceptions.RedisError:
-            response =  Response(DB_ERROR_STR, status=400)
+            # payment_lock.release()
+            app.logger.info(f"less than 0 credit")
+            response = Response(f"User: {user_id} credit cannot get reduced below zero!", status=400)
+        else:
+            try:
+                app.logger.info(f"entered try to commit credit")
+                db.set(user_id, msgpack.encode(user_entry))
+                response = Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
+            except redis.exceptions.RedisError:
+                response =  Response(DB_ERROR_STR, status=400)
     finally:
-        payment_lock.release()
+        # payment_lock.release()
+        app.logger.info(f"entered finally after credit chnage")
         return response
 
 @app.post('/check_money/<user_id>/<amount>')

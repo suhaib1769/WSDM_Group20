@@ -106,17 +106,17 @@ def add_stock(item_id: str, amount: int):
 
 @app.post("/subtract/<item_id>/<amount>")
 def remove_stock(item_id: str, amount: int):
-    retries = 0
-    stock_lock = db.lock("stock_lock")
+    # retries = 0
+    # stock_lock = db.lock("stock_lock")
 
-    while retries < 3:
-        if stock_lock.acquire(blocking=False):  # Try to acquire the lock without blocking
-            break
-        retries += 1
-        time.sleep(1)  # Wait for 1 second before retrying
-    else:
-        # If we exit the while loop without breaking, it means all retries failed
-        return Response("Failed to acquire lock after multiple attempts", status=400)
+    # while retries < 3:
+    #     if stock_lock.acquire(blocking=False):  # Try to acquire the lock without blocking
+    #         break
+    #     retries += 1
+    #     time.sleep(1)  # Wait for 1 second before retrying
+    # else:
+    #     # If we exit the while loop without breaking, it means all retries failed
+    #     return Response("Failed to acquire lock after multiple attempts", status=400)
     try:
         item_entry: StockValue = get_item_from_db(item_id)
         # update stock, serialize and update database
@@ -130,7 +130,7 @@ def remove_stock(item_id: str, amount: int):
             response =  Response(DB_ERROR_STR, status=400)
         response = Response(f"Item: {item_id} stock updated to: {item_entry.stock}", status=200)
     finally:
-        stock_lock.release()  # Make sure to release the lock
+        # stock_lock.release()  # Make sure to release the lock
         return response
 
 
