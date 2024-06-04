@@ -158,26 +158,35 @@ def checkout(order_id: str):
 
     if order_lock.acquire():
         for item_id, quantity in items_quantities.items():
-            enough_stock = send_post_request(f"{GATEWAY_URL}/stock/check_stock/{item_id}/{quantity}")
+            enough_stock = None
+            while (enough_stock is None) or (enough_stock.status_code == 502):  
+                enough_stock = send_post_request(f"{GATEWAY_URL}/stock/check_stock/{item_id}/{quantity}")
             if enough_stock.status_code != 200:
                 # If one item does not have enough stock we need to rollback
                 order_lock.release()
                 abort(400, f'Out of stock on item_id: {item_id}')
+            enough_money = None
+            while (enough_money is None) or (enough_money.status_code == 502):  
+                enough_money = send_post_request(f"{GATEWAY_URL}/payment/check_money/{order_entry.user_id}/{order_entry.total_cost}")
 
-        enough_money = send_post_request(f"{GATEWAY_URL}/payment/check_money/{order_entry.user_id}/{order_entry.total_cost}")
+       
         if enough_money.status_code != 200:
             # If the user does not have enough credit we need to rollback all the item stock subtractions
             order_lock.release()
             abort(400, "User out of credit")
 
         for item_id, quantity in items_quantities.items():
-            stock_reply = send_post_request(f"{GATEWAY_URL}/stock/subtract/{item_id}/{quantity}")
+            stock_reply = None
+            while (stock_reply is None) or (stock_reply.status_code == 502):  
+                stock_reply = send_post_request(f"{GATEWAY_URL}/stock/subtract/{item_id}/{quantity}")
             if stock_reply.status_code != 200:
                 order_lock.release()
                 abort(400, f'Out of stock on item_id: {item_id}')
 
-        user_reply = send_post_request(f"{GATEWAY_URL}/payment/pay/{order_entry.user_id}/{order_entry.total_cost}")
-        if user_reply.status_code != 200:
+        payment_reply = None
+        while (payment_reply is None) or (payment_reply.status_code == 502):  
+            payment_reply = send_post_request(f"{GATEWAY_URL}/payment/pay/{order_entry.user_id}/{order_entry.total_cost}")
+        if payment_reply.status_code != 200:
             order_lock.release()
             abort(400, "User out of credit")
         order_entry.paid = True
