@@ -165,10 +165,10 @@ def checkout(order_id: str):
                 # If one item does not have enough stock we need to rollback
                 order_lock.release()
                 abort(400, f'Out of stock on item_id: {item_id}')
-            enough_money = None
-            while (enough_money is None) or (enough_money.status_code == 502):  
-                enough_money = send_post_request(f"{GATEWAY_URL}/payment/check_money/{order_entry.user_id}/{order_entry.total_cost}")
-
+        
+        enough_money = None
+        while (enough_money is None) or (enough_money.status_code == 502):  
+            enough_money = send_post_request(f"{GATEWAY_URL}/payment/check_money/{order_entry.user_id}/{order_entry.total_cost}")
        
         if enough_money.status_code != 200:
             # If the user does not have enough credit we need to rollback all the item stock subtractions
