@@ -43,6 +43,18 @@ services:
     image: redis:7.2-bookworm
     command: redis-server --requirepass redis --maxmemory 512mb
 
+  order_consumer-service:
+    build: ./order_consumer
+    image: order_consumer:latest
+    command: gunicorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
+    env_file:
+      - env/order_redis.env
+    depends_on:
+      order-db:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+
   stock-service:
     build: ./stock
     image: stock:latest
