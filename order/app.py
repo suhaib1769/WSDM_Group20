@@ -156,14 +156,14 @@ def checkout(order_id: str):
     for item_id, quantity in order_entry.items:
         items_quantities[item_id] += quantity
     order_transaction_id = order_id+"-l"
-    if db.hmget(order_transaction_id, 'order_committed') == 1:
+    if db.hmget(order_transaction_id, 'order_committed')[0] == str(1).encode():
         return Response("Checkout successful", status=200)
     # order_transaction_id = str(uuid.uuid4())        
     if order_lock.acquire():
         for item_id, quantity in items_quantities.items():
-            if db.hmget(order_transaction_id, f'stock_available_{item_id}') == 0:
+            if db.hmget(order_transaction_id, f'stock_available_{item_id}')[0] == str(0).encode():
                 abort(400, f'Out of stock on item_id: {item_id}')
-            elif db.hmget(order_transaction_id, f'stock_available_{item_id}') == 1:
+            elif db.hmget(order_transaction_id, f'stock_available_{item_id}')[0] == str(1).encode():
                 continue
 
             enough_stock = None     
@@ -179,7 +179,7 @@ def checkout(order_id: str):
             
             db.hmset(order_transaction_id, {transaction_id_check_stock: msgpack.encode(f'OrderService: Success {transaction_id_check_stock}: Check stock for item: {item_id}'), f'stock_available_{item_id}':1})
 
-        if db.hmget(order_transaction_id, f'credit_available_{order_entry.user_id}')== 0:
+        if db.hmget(order_transaction_id, f'credit_available_{order_entry.user_id}')[0] == str(0).encode():
                 abort(400, "User out of credit")
         elif db.hmget(order_transaction_id, f'credit_available_{order_entry.user_id}') == [None]:
             enough_money = None
@@ -198,9 +198,9 @@ def checkout(order_id: str):
        
         app.logger.info('Subtracting Stock')
         for item_id, quantity in items_quantities.items():
-            if db.hmget(order_transaction_id, f'stock_subtracted_{item_id}') == 0:
+            if db.hmget(order_transaction_id, f'stock_subtracted_{item_id}')[0] == str(0).encode():
                 abort(400, f'Out of stock on item_id: {item_id}')
-            elif db.hmget(order_transaction_id, f'stock_subtracted_{item_id}') == 1:
+            elif db.hmget(order_transaction_id, f'stock_subtracted_{item_id}')[0] == str(1).encode():
                 continue
             stock_reply = None
             transaction_id_subtract_stock = str(uuid.uuid4())
@@ -216,7 +216,7 @@ def checkout(order_id: str):
             db.hmset(order_transaction_id, {transaction_id_subtract_stock: msgpack.encode(f'OrderService: Success {transaction_id_subtract_stock}: Subtract stock for item: {item_id}'), f'stock_subtracted_{item_id}':1})
 
         app.logger.info('Subtracting Money')
-        if db.hmget(order_transaction_id, f'credit_subtracted_{order_entry.user_id}')== 0:
+        if db.hmget(order_transaction_id, f'credit_subtracted_{order_entry.user_id}')[0] == str(0).encode():
                 abort(400, "User out of credit")
         elif db.hmget(order_transaction_id, f'credit_subtracted_{order_entry.user_id}') == [None]:
             payment_reply = None

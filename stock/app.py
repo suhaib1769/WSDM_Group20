@@ -1,6 +1,7 @@
 import logging
 import os
 import atexit
+import time
 import uuid
 
 import redis
@@ -96,10 +97,9 @@ def add_stock(item_id: str, amount: int):
 @app.post('/subtract/<item_id>/<amount>/<order_transaction_id>')
 def remove_stock(item_id: str, amount: int, order_transaction_id: str):
     item_entry: StockValue = get_item_from_db(item_id)
-    
-    if db.hmget(order_transaction_id, f'subtract_commit_{item_id}') == 1:
+    app.logger.info(f"Stock service : entered subtract")
+    if db.hmget(order_transaction_id, f'subtract_commit_{item_id}')[0] == str(1).encode():
         return Response(f"Item: {item_id} stock updated to: {item_entry.stock}", status=200)
-        
     transaction_id_subtract_stock = str(uuid.uuid4())
     db.hmset(order_transaction_id, {transaction_id_subtract_stock: msgpack.encode(f'StockService: Started {transaction_id_subtract_stock}: Subtract stock for item: {item_id}, Amount: {amount}')})
     # update stock, serialize and update database
@@ -112,6 +112,8 @@ def remove_stock(item_id: str, amount: int, order_transaction_id: str):
         db.hmset(order_transaction_id, {transaction_id_subtract_stock: msgpack.encode(f'StockService: Failed {transaction_id_subtract_stock}: Subtract stock for item: {item_id}, Amount: {amount}')})
         return abort(400, DB_ERROR_STR)
     db.hmset(order_transaction_id, {transaction_id_subtract_stock: msgpack.encode(f'StockService: Success {transaction_id_subtract_stock}: Subtract stock for item: {item_id}, Amount: {amount}')})
+    app.logger.info("Stock service : adding sleep before response")
+    time.sleep(20)
     return Response(f"Item: {item_id} stock updated to: {item_entry.stock}", status=200)
 
 
