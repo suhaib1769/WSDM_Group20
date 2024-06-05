@@ -97,7 +97,7 @@ def remove_credit(user_id: str, amount: int, order_transaction_id: str):
     app.logger.debug(f"Removing {amount} credit from user: {user_id}")
     user_entry: UserValue = get_user_from_db(user_id)
     
-    if db.hmget(order_transaction_id, 'payment_commited') == 1:
+    if db.hmget(order_transaction_id, 'payment_commited')[0] == str(1).encode():
         return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
     
     transaction_id_subtract_payment = str(uuid.uuid4())
