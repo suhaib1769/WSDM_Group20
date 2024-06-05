@@ -91,27 +91,40 @@ def add_credit(user_id: str, amount: int):
     return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
 
 
-@app.post('/pay/<user_id>/<amount>')
-def remove_credit(user_id: str, amount: int):
+@app.post('/pay/<user_id>/<amount>/<order_transaction_id>')
+def remove_credit(user_id: str, amount: int, order_transaction_id: str):
+    # Check if something for this order_transaction_id has already been comitted before. If so then return 200 else continue with process.
     app.logger.debug(f"Removing {amount} credit from user: {user_id}")
     user_entry: UserValue = get_user_from_db(user_id)
+    
+    if db.hmget(order_transaction_id, 'payment_commited') == 1:
+        return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
+    
+    transaction_id_subtract_payment = str(uuid.uuid4())
+    db.hmset(order_transaction_id, {transaction_id_subtract_payment: msgpack.encode(f'PaymentService: Started {transaction_id_subtract_payment}: Subtract payment for user: {user_id}, Amount: {amount}')})
+
     # update credit, serialize and update database
     user_entry.credit -= int(amount)
-    # if user_entry.credit < 0:
-    #     abort(400, f"User: {user_id} credit cannot get reduced below zero!")
     try:
         db.set(user_id, msgpack.encode(user_entry))
+        db.hmset(order_transaction_id, {transaction_id_subtract_payment: msgpack.encode(f'PaymentService: Commit {transaction_id_subtract_payment}: Subtract payment for user: {user_id}, Amount: {amount}'), 'payment_commited': 1})
     except redis.exceptions.RedisError:
+        db.hmset(order_transaction_id, {transaction_id_subtract_payment: msgpack.encode(f'PaymentService: Failed {transaction_id_subtract_payment}: Subtract payment for user: {user_id}, Amount: {amount}')})
         return abort(400, DB_ERROR_STR)
+    db.hmset(order_transaction_id, {transaction_id_subtract_payment: msgpack.encode(f'PaymentService: Success {transaction_id_subtract_payment}: Subtract payment for user: {user_id}, Amount: {amount}')})
     return Response(f"User: {user_id} credit updated to: {user_entry.credit}", status=200)
 
-@app.post('/check_money/<user_id>/<amount>')
-def check_money(user_id: str, amount: int):
+@app.post('/check_money/<user_id>/<amount>/<order_transaction_id>')
+def check_money(user_id: str, amount: int, order_transaction_id: str):
     user_entry: UserValue = get_user_from_db(user_id)
+    transaction_id_check_payment = str(uuid.uuid4())
+    db.hmset(order_transaction_id, {transaction_id_check_payment: msgpack.encode(f'PaymentService: Started {transaction_id_check_payment}: Check payment for user: {user_id}, Amount: {amount}')})
     # update credit, serialize and update database
     user_entry.credit -= int(amount)
     if user_entry.credit < 0:
+        db.hmset(order_transaction_id, {transaction_id_check_payment: msgpack.encode(f'PaymentService: Failed {transaction_id_check_payment}: Check payment for user: {user_id}, Amount: {amount}')})
         abort(400, f"User: {user_id} credit cannot get reduced below zero!")
+    db.hmset(order_transaction_id, {transaction_id_check_payment: msgpack.encode(f'PaymentService: Success {transaction_id_check_payment}: Check payment for user: {user_id}, Amount: {amount}')})
     return Response(f"User: {user_id} has enough credit", status=200)
 
 
