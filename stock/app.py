@@ -1,7 +1,6 @@
 import logging
 import os
 import atexit
-import time
 import uuid
 
 import redis
@@ -112,8 +111,6 @@ def remove_stock(item_id: str, amount: int, order_transaction_id: str):
         db.hmset(order_transaction_id, {transaction_id_subtract_stock: msgpack.encode(f'StockService: Failed {transaction_id_subtract_stock}: Subtract stock for item: {item_id}, Amount: {amount}')})
         return abort(400, DB_ERROR_STR)
     db.hmset(order_transaction_id, {transaction_id_subtract_stock: msgpack.encode(f'StockService: Success {transaction_id_subtract_stock}: Subtract stock for item: {item_id}, Amount: {amount}')})
-    app.logger.info("Stock service : adding sleep before response")
-    time.sleep(20)
     return Response(f"Item: {item_id} stock updated to: {item_entry.stock}", status=200)
 
 
