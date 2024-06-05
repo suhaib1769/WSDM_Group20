@@ -150,14 +150,22 @@ def rollback_stock(removed_items: list[tuple[str, int]]):
 def checkout(order_id: str):
     app.logger.debug(f"Checking out {order_id}")
     order_entry: OrderValue = get_order_from_db(order_id)
-    order_lock = db.lock("order_lock")
+    order_lock = db.lock("order_lock", timeout = 100)
     # get the quantity per item
     items_quantities: dict[str, int] = defaultdict(int)
     for item_id, quantity in order_entry.items:
         items_quantities[item_id] += quantity
-    order_transaction_id = str(uuid.uuid4())        
+    order_transaction_id = order_id+"-l"
+    if db.hmget(order_transaction_id, 'order_committed') == 1:
+        return Response("Checkout successful", status=200)
+    # order_transaction_id = str(uuid.uuid4())        
     if order_lock.acquire():
         for item_id, quantity in items_quantities.items():
+            if db.hmget(order_transaction_id, f'stock_available_{item_id}') == 0:
+                abort(400, f'Out of stock on item_id: {item_id}')
+            elif db.hmget(order_transaction_id, f'stock_available_{item_id}') == 1:
+                continue
+
             enough_stock = None     
             transaction_id_check_stock = str(uuid.uuid4())
             db.hmset(order_transaction_id, {transaction_id_check_stock: msgpack.encode(f'OrderService: Start {transaction_id_check_stock}: Check stock for item: {item_id}')})
@@ -166,27 +174,34 @@ def checkout(order_id: str):
             if enough_stock.status_code != 200:
                 # If one item does not have enough stock we need to rollback
                 order_lock.release()
-                db.hmset(order_transaction_id, {transaction_id_check_stock: msgpack.encode(f'OrderService: Failed {transaction_id_check_stock}: Check stock for item: {item_id}')})
+                db.hmset(order_transaction_id, {transaction_id_check_stock: msgpack.encode(f'OrderService: Failed {transaction_id_check_stock}: Check stock for item: {item_id}'), f'stock_available_{item_id}':0})
                 abort(400, f'Out of stock on item_id: {item_id}')
             
-            db.hmset(order_transaction_id, {transaction_id_check_stock: msgpack.encode(f'OrderService: Success {transaction_id_check_stock}: Check stock for item: {item_id}')})
-                        
-        enough_money = None
-        transaction_id_check_payment = str(uuid.uuid4())
-        db.hmset(order_transaction_id, {transaction_id_check_payment: msgpack.encode(f'OrderService: Start {transaction_id_check_payment}: Check payment for user: {order_entry.user_id}')})
-        while (enough_money is None) or (enough_money.status_code == 502):  
-            enough_money = send_post_request(f"{GATEWAY_URL}/payment/check_money/{order_entry.user_id}/{order_entry.total_cost}/{order_transaction_id}")
-       
-        if enough_money.status_code != 200:
-            # If the user does not have enough credit we need to rollback all the item stock subtractions
-            order_lock.release()
-            db.hmset(order_transaction_id, {transaction_id_check_payment: msgpack.encode(f'OrderService: Failed {transaction_id_check_payment}: Check payment for user: {order_entry.user_id}')})
-            abort(400, "User out of credit")
+            db.hmset(order_transaction_id, {transaction_id_check_stock: msgpack.encode(f'OrderService: Success {transaction_id_check_stock}: Check stock for item: {item_id}'), f'stock_available_{item_id}':1})
+
+        if db.hmget(order_transaction_id, f'credit_available_{order_entry.user_id}')== 0:
+                abort(400, "User out of credit")
+        elif db.hmget(order_transaction_id, f'credit_available_{order_entry.user_id}') == [None]:
+            enough_money = None
+            transaction_id_check_payment = str(uuid.uuid4())
+            db.hmset(order_transaction_id, {transaction_id_check_payment: msgpack.encode(f'OrderService: Start {transaction_id_check_payment}: Check payment for user: {order_entry.user_id}')})
+            while (enough_money is None) or (enough_money.status_code == 502):  
+                enough_money = send_post_request(f"{GATEWAY_URL}/payment/check_money/{order_entry.user_id}/{order_entry.total_cost}/{order_transaction_id}")
         
-        db.hmset(order_transaction_id, {transaction_id_check_payment: msgpack.encode(f'OrderService: Success {transaction_id_check_payment}: Check payment for user: {order_entry.user_id}')})
+            if enough_money.status_code != 200:
+                # If the user does not have enough credit we need to rollback all the item stock subtractions
+                order_lock.release()
+                db.hmset(order_transaction_id, {transaction_id_check_payment: msgpack.encode(f'OrderService: Failed {transaction_id_check_payment}: Check payment for user: {order_entry.user_id}'), f'credit_available_{order_entry.user_id}': 0 })
+                abort(400, "User out of credit")
+            
+            db.hmset(order_transaction_id, {transaction_id_check_payment: msgpack.encode(f'OrderService: Success {transaction_id_check_payment}: Check payment for user: {order_entry.user_id}'), f'credit_available_{order_entry.user_id}': 1})
        
         app.logger.info('Subtracting Stock')
         for item_id, quantity in items_quantities.items():
+            if db.hmget(order_transaction_id, f'stock_subtracted_{item_id}') == 0:
+                abort(400, f'Out of stock on item_id: {item_id}')
+            elif db.hmget(order_transaction_id, f'stock_subtracted_{item_id}') == 1:
+                continue
             stock_reply = None
             transaction_id_subtract_stock = str(uuid.uuid4())
             db.hmset(order_transaction_id, {transaction_id_subtract_stock: msgpack.encode(f'OrderService: Start {transaction_id_subtract_stock}: Subtract stock for item: {item_id}')})
@@ -195,32 +210,38 @@ def checkout(order_id: str):
             
             if stock_reply.status_code != 200:
                 order_lock.release()
-                db.hmset(order_transaction_id, {transaction_id_subtract_stock: msgpack.encode(f'OrderService: Failed {transaction_id_subtract_stock}: Subtract stock for item: {item_id}')})
+                db.hmset(order_transaction_id, {transaction_id_subtract_stock: msgpack.encode(f'OrderService: Failed {transaction_id_subtract_stock}: Subtract stock for item: {item_id}'), f'stock_subtracted_{item_id}':0})
                 abort(400, f'Out of stock on item_id: {item_id}')
 
-            db.hmset(order_transaction_id, {transaction_id_subtract_stock: msgpack.encode(f'OrderService: Success {transaction_id_subtract_stock}: Subtract stock for item: {item_id}')})
+            db.hmset(order_transaction_id, {transaction_id_subtract_stock: msgpack.encode(f'OrderService: Success {transaction_id_subtract_stock}: Subtract stock for item: {item_id}'), f'stock_subtracted_{item_id}':1})
 
         app.logger.info('Subtracting Money')
-        payment_reply = None
-        transaction_id_subtract_payment = str(uuid.uuid4())
-        db.hmset(order_transaction_id, {transaction_id_subtract_payment: msgpack.encode(f'OrderService: Start {transaction_id_subtract_payment}: Subtract payment for user: {order_entry.user_id}')})
-        while (payment_reply is None) or (payment_reply.status_code == 502):  
-            payment_reply = send_post_request(f"{GATEWAY_URL}/payment/pay/{order_entry.user_id}/{order_entry.total_cost}/{order_transaction_id}")
-        if payment_reply.status_code != 200:
-            order_lock.release()
-            db.hmset(order_transaction_id, {transaction_id_subtract_payment: msgpack.encode(f'OrderService: Failed {transaction_id_subtract_payment}: Subtract payment for user: {order_entry.user_id}')})
-            abort(400, "User out of credit")
-        order_entry.paid = True
-        db.hmset(order_transaction_id, {transaction_id_subtract_payment: msgpack.encode(f'OrderService: Success {transaction_id_subtract_payment}: Subtract payment for user: {order_entry.user_id}')})
+        if db.hmget(order_transaction_id, f'credit_subtracted_{order_entry.user_id}')== 0:
+                abort(400, "User out of credit")
+        elif db.hmget(order_transaction_id, f'credit_subtracted_{order_entry.user_id}') == [None]:
+            payment_reply = None
+            transaction_id_subtract_payment = str(uuid.uuid4())
+            db.hmset(order_transaction_id, {transaction_id_subtract_payment: msgpack.encode(f'OrderService: Start {transaction_id_subtract_payment}: Subtract payment for user: {order_entry.user_id}')})
+            while (payment_reply is None) or (payment_reply.status_code == 502):  
+                payment_reply = send_post_request(f"{GATEWAY_URL}/payment/pay/{order_entry.user_id}/{order_entry.total_cost}/{order_transaction_id}")
+            if payment_reply.status_code != 200:
+                order_lock.release()
+                db.hmset(order_transaction_id, {transaction_id_subtract_payment: msgpack.encode(f'OrderService: Failed {transaction_id_subtract_payment}: Subtract payment for user: {order_entry.user_id}'), f'credit_subtracted_{order_entry.user_id}':0})
+                abort(400, "User out of credit")
+            order_entry.paid = True
+            db.hmset(order_transaction_id, {transaction_id_subtract_payment: msgpack.encode(f'OrderService: Success {transaction_id_subtract_payment}: Subtract payment for user: {order_entry.user_id}'), f'credit_subtracted_{order_entry.user_id}':1})
 
         try:
             db.set(order_id, msgpack.encode(order_entry))
+            db.hmset(order_transaction_id, {"order_committed": 1})
+
         except redis.exceptions.RedisError:
             order_lock.release()
             return abort(400, DB_ERROR_STR)
         order_lock.release()
         app.logger.debug("Checkout successful")
         return Response("Checkout successful", status=200)
+
 
 
 if __name__ == '__main__':
