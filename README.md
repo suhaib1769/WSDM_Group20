@@ -8,26 +8,26 @@ consistent, fault tolerant but not scalable
 - The order service acts as the coordinator.
 - On receiving a checkout request, the order service databse is locked.
 - **Prepare Phase** : 
-    - Order Service calls the Stock service to check if it has enough stock and the Payment service to check if the user has enough credits to process the order
+    - Order service calls the stock service to check if it has enough stock and the paymment service to check if the user has enough credits to process the order
     - If the stock service does not have sufficient stock or if the user does not have sufficient credits (400 status), the transaction is cancelled and the locks are released.
     - If both services return a 200 status(success), the commit phase is commenced. 
 - **Commit Phase** : 
-    - In the commit phase, Order services sends a call to stock and payment services to commit the changes to the database.
+    - In the commit phase, order service sends a call to stock and payment services to commit the changes to the database.
     - Once both the services completes the commit operations, the order service db commits the changes and releases the lock.
 
 ### Fault Tolerance
 To ensure that our system is robust, we implemented recovery logging. The logs and values are written to the database. For each transaction, we generate a unique id. Each time we write to the database, the logs corresponding the transaction id are written to the database as well to keep track of the changes made so far. This ensures exactly once processing. 
 
-**Order Service Failure** : If the Order service fails, we store logs in the stock and payment service db corresponding to the given order. Once the order services revives, if the client sends the same checkout http requst again, then it will continue with the payment and stock operations using their respective logs. However, if the same request is not resent then the service will continue on and there may be inconsistencies between stock and payment service. 
+**Order Service Failure** : If the order service fails, we store logs in the stock and payment service db corresponding to the given order. Once the order services revives, if the client sends the same checkout http requst again, then it will continue with the payment and stock operations using their respective logs. However, if the same request is not resent then the service will continue on and there may be inconsistencies between stock and payment service. 
 
-**Stock Service Failure** : If Stock service fails, the order service waits for the stock service to recover and checks the stock service logs to track the changes written to the disk so far. For each item in the stock, we check if there are any write operations done for the item and order combination in the stock service database. If there are, we return a 200 status back to stock. If not, we perform the operations in the stock service and return the response.
+**Stock Service Failure** : If stock service fails, the order service waits for the stock service to recover and checks the stock service logs to track the changes written to the disk so far. For each item in the stock, we check if there are any write operations done for the item and order combination in the stock service database. If there are, we return a 200 status back to stock. If not, we perform the operations in the stock service and return the response.
 
-**Payment Service Failure** : If the Payment service fails, the order service waits for the payment service to recover and checks the payment service logs to track the changes written to the disk so far. If there are any write operations done corresponding to the order in the payment service database, we return a 200 status back to stock. If not, we perform the operations in the payment service and return the response.
+**Payment Service Failure** : If the payment service fails, the order service waits for the payment service to recover and checks the payment service logs to track the changes written to the disk so far. If there are any write operations done corresponding to the order in the payment service database, we return a 200 status back to stock. If not, we perform the operations in the payment service and return the response.
 
 
 For fault tolerance, we made the following assumptions: 
 - Once a service is down, it would be revived after a while.  
-- On failing a service, any API calls made to the service would return a "502 Gateway Not Found" response
+- On failing a service, any API calls made to the service would return a "502 Gateway Not Found" response.
 
 
 ## What works :
@@ -37,7 +37,7 @@ For fault tolerance, we made the following assumptions:
 
 ## Limitations of our method: 
 - Not Scalable
-- Failure of the Coordinator Service could impact the protocol could cause inconsistencies if the request are not resent. 
+- Failure of the coordinator (order service) could impact the protocol and cause inconsistencies if the request is not resent. 
 
 ## Locust result
 ![Locust](./locust.jpeg)
@@ -52,9 +52,9 @@ Our three significant attempts are outlined as follows:
 - Used AIOKafka as the message bus between the services
 - To make it asychronous, we used Quart and aiokafka
 - The order service was again the orchetrator
-- We created our own test endpoint called find_item that when called would publish a message from order to stock. After consuming the message, stock would find the requested item and publish a message back to the order service. We specified the required topics to ensure that the corressponding services would listens for the correct messages.
+- We created our own test endpoint called find_item that when called would publish a message from order to stock. After consuming the message, stock would find the requested item and publish a message back to the order service. We specified the required topics to ensure that the corressponding services would listen for the correct messages.
 ### Issues faced
-- While the communcation using aiokfka worked for our test endpoint, whn incorporating HTTP requests our implementation failed.
+- While the communcation using aiokfka worked for our test endpoint, when incorporating HTTP requests our implementation failed.
 - The quart app of the stock had a continuous consumer and when we needed to consume additional external HTTP requests sent to stock like add_item the service was blocked.
 
 ## **Synchronous orchestrated SAGAS with rabbitmq - with threading - {branch: rmq_order_payment}**
